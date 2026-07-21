@@ -155,6 +155,22 @@ struct Clip: Identifiable, Codable {
     /// does not currently affect `points` — see `Clip.points`, which is still driven by `basePoints`).
     let sourceScore: Int?
 
+    /// The countdown duration for this question. For multiple choice this is the clip's own
+    /// real length; for Audio Lineup, `trackLengthSeconds` is only the mystery clip's length
+    /// (irrelevant once it's done playing) — what matters during the answer phase is having
+    /// enough time to audition the candidates, so this sums each choice's own length instead.
+    /// Falls back to the difficulty's default when no real length is known (e.g. hand-written
+    /// sample data with no imported track length).
+    var timerSeconds: Int {
+        switch questionType {
+        case .multipleChoice:
+            return trackLengthSeconds > 0 ? trackLengthSeconds : difficulty.timerSeconds
+        case .audioLineup:
+            let total = audioLineupQuestion?.choices.reduce(0) { $0 + $1.trackLengthSeconds } ?? 0
+            return total > 0 ? total : difficulty.timerSeconds
+        }
+    }
+
     var points: Int {
         let base: Int
         switch questionType {

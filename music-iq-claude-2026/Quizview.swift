@@ -65,6 +65,7 @@ final class QuizViewModel: ObservableObject {
     @Published var mysteryPlayed: Bool    = false
     @Published var showLineup: Bool       = false
     @Published var playingChoiceId: UUID? = nil
+    @Published var lockedChoiceIds: Set<UUID> = []
     @Published var hintUsed: Bool             = false
     @Published var eliminatedOptionIndex: Int? = nil
     @Published var eliminatedChoiceId: UUID?   = nil
@@ -127,7 +128,7 @@ final class QuizViewModel: ObservableObject {
 
     func startTimer() {
         timerTask?.cancel()
-        let seconds   = currentClip.difficulty.timerSeconds
+        let seconds   = currentClip.timerSeconds
         timerValue    = seconds
         timerProgress = 1.0
         timerTask = Task { [weak self] in
@@ -150,7 +151,7 @@ final class QuizViewModel: ObservableObject {
     /// Shows the full countdown duration for the upcoming question without starting it —
     /// the clock only actually starts once the user taps play.
     func resetTimerDisplay() {
-        timerValue    = currentClip.difficulty.timerSeconds
+        timerValue    = currentClip.timerSeconds
         timerProgress = 1.0
     }
 
@@ -201,7 +202,7 @@ final class QuizViewModel: ObservableObject {
         showFeedback = true
 
         let elapsed = Date().timeIntervalSince(questionStartTime)
-        let speed   = max(0, min(1.0, 1.0 - elapsed / Double(currentClip.difficulty.timerSeconds)))
+        let speed   = max(0, min(1.0, 1.0 - elapsed / Double(currentClip.timerSeconds)))
         var earned  = 0
 
         if correct {
@@ -239,6 +240,7 @@ final class QuizViewModel: ObservableObject {
             hintUsed              = false
             eliminatedOptionIndex = nil
             eliminatedChoiceId    = nil
+            lockedChoiceIds       = []
             questionStartTime = Date()
             resetTimerDisplay()
         }
@@ -268,22 +270,25 @@ final class QuizViewModel: ObservableObject {
         }
     }
 
+    /// Mirrors the multiple-choice play button: a choice can be paused and resumed freely
+    /// (position preserved, using its own real length to know when it's actually finished),
+    /// but once it's finished — or abandoned in favor of a different choice, whose playback
+    /// can't be resumed once AudioManager's single player has moved on — it locks for good.
     func toggleChoice(_ choice: AudioChoice) {
-        if playingChoiceId == choice.id {
-            AudioManager.shared.stopAll()
-            playingChoiceId = nil
+        guard !lockedChoiceIds.contains(choice.id) else { return }
+        let audio = AudioManager.shared
+        let isCurrent = playingChoiceId == choice.id
+
+        if isCurrent && audio.isPlaying {
+            audio.pause()
+        } else if isCurrent && !audio.didFinishPlaying {
+            audio.resume()
         } else {
-            AudioManager.shared.stopAll()
-            playingChoiceId = choice.id
-            AudioManager.shared.play(fileName: choice.fileName)
-            let seconds = choice.trackLengthSeconds > 0
-                ? Double(choice.trackLengthSeconds) : Self.fallbackPlaybackSeconds
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                await MainActor.run {
-                    if self?.playingChoiceId == choice.id { self?.playingChoiceId = nil }
-                }
+            if let previous = playingChoiceId, previous != choice.id {
+                lockedChoiceIds.insert(previous)
             }
+            playingChoiceId = choice.id
+            audio.play(fileName: choice.fileName)
         }
     }
 
@@ -727,12 +732,21 @@ struct MCQuestionView: View {
 // MARK: - Audio Lineup
 struct LineupQuestionView: View {
     @ObservedObject var vm: QuizViewModel
+    @ObservedObject private var audio = AudioManager.shared
 
     func choiceState(_ i: Int, _ choice: AudioChoice) -> OptionState {
         guard vm.answered else { return vm.selectedOption == i ? .selected : .normal }
         if choice.isCorrect { return .correct }
         if vm.selectedOption == i && !vm.isCorrect { return .wrong }
         return .normal
+    }
+
+    private func isCurrent(_ choice: AudioChoice) -> Bool { vm.playingChoiceId == choice.id }
+    private func isPlaying(_ choice: AudioChoice) -> Bool { isCurrent(choice) && audio.isPlaying }
+    /// True once this specific choice has finished playing, or was abandoned for a different
+    /// choice — either way there's nothing left to resume, so its play button locks.
+    private func hasFinished(_ choice: AudioChoice) -> Bool {
+        (isCurrent(choice) && audio.didFinishPlaying) || vm.lockedChoiceIds.contains(choice.id)
     }
 
     var body: some View {
@@ -752,9 +766,10 @@ struct LineupQuestionView: View {
                     if choice.id != vm.eliminatedChoiceId {
                         AudioChoiceBtn(
                             choice: choice, index: i,
-                            isPlaying: vm.playingChoiceId == choice.id,
+                            isPlaying: isPlaying(choice),
                             state: choiceState(i, choice),
-                            disabled: vm.answered,
+                            selectDisabled: vm.answered,
+                            playDisabled: vm.answered || hasFinished(choice),
                             onPlay: { vm.toggleChoice(choice) },
                             onSelect: { vm.selectedOption = i }
                         )
@@ -848,7 +863,12 @@ struct OptionBtn: View {
 // MARK: - Audio Choice Button
 struct AudioChoiceBtn: View {
     let choice: AudioChoice; let index: Int
-    let isPlaying: Bool; let state: OptionState; let disabled: Bool
+    let isPlaying: Bool; let state: OptionState
+    /// Gates picking this choice as the answer — only once the question's answered.
+    let selectDisabled: Bool
+    /// Gates the play/pause button specifically — also locks once this choice has finished
+    /// playing (or was abandoned for another choice), independent of whether it's selectable.
+    let playDisabled: Bool
     let onPlay: () -> Void; let onSelect: () -> Void
     var body: some View {
         Button(action: onSelect) {
@@ -861,7 +881,8 @@ struct AudioChoiceBtn: View {
                             Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                                 .font(.system(size: 13)).foregroundColor(.white)
                         }
-                    }.disabled(disabled)
+                        .opacity(playDisabled ? 0.5 : 1.0)
+                    }.disabled(playDisabled)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(choice.label).font(.system(size: 13, weight: .medium)).foregroundColor(state.text)
                         Text(choice.description).font(.system(size: 12)).foregroundColor(.secondary)
@@ -879,7 +900,7 @@ struct AudioChoiceBtn: View {
             .padding(14).background(state.bg).cornerRadius(12)
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(state.border, lineWidth: 0.5))
         }
-        .buttonStyle(.plain).disabled(disabled)
+        .buttonStyle(.plain).disabled(selectDisabled)
     }
 }
 
