@@ -65,6 +65,9 @@ final class QuizViewModel: ObservableObject {
     @Published var mysteryPlayed: Bool    = false
     @Published var showLineup: Bool       = false
     @Published var playingChoiceId: UUID? = nil
+    @Published var hintUsed: Bool             = false
+    @Published var eliminatedOptionIndex: Int? = nil
+    @Published var eliminatedChoiceId: UUID?   = nil
 
     let quizSet: QuizSet
     var onComplete: (Int, [GameResult], Int, Int) -> Void
@@ -90,6 +93,36 @@ final class QuizViewModel: ObservableObject {
     }
     var bonusMultiplier: Double {
         streak >= 3 ? 2.0 : streak >= 2 ? 1.5 : 1.0
+    }
+
+    var hintAvailable: Bool {
+        !hintUsed && !answered && !(currentClip.hint?.isEmpty ?? true)
+    }
+
+    /// Eliminates one wrong option (or wrong lineup choice) at random and reveals the clip's
+    /// hint text. Only usable once per question, before it's answered.
+    func useHint() {
+        guard hintAvailable else { return }
+        hintUsed = true
+
+        switch currentClip.questionType {
+        case .multipleChoice:
+            guard let q = currentClip.multipleChoiceQuestion else { return }
+            let wrongIndices = q.options.indices.filter { $0 != q.correctIndex }
+            eliminatedOptionIndex = wrongIndices.randomElement()
+            if selectedOption == eliminatedOptionIndex { selectedOption = nil }
+        case .audioLineup:
+            guard let lu = currentClip.audioLineupQuestion else { return }
+            guard let toRemove = lu.choices.filter({ !$0.isCorrect }).randomElement() else { return }
+            eliminatedChoiceId = toRemove.id
+            if playingChoiceId == toRemove.id {
+                AudioManager.shared.stopAll()
+                playingChoiceId = nil
+            }
+            if let idx = lu.choices.firstIndex(where: { $0.id == toRemove.id }), selectedOption == idx {
+                selectedOption = nil
+            }
+        }
     }
 
     func startTimer() {
@@ -132,6 +165,8 @@ final class QuizViewModel: ObservableObject {
 
     func timeUp() {
         guard !answered else { return }
+        AudioManager.shared.stopAll()
+        playingChoiceId = nil
         answered     = true
         isCorrect    = false
         showFeedback = true
@@ -150,6 +185,8 @@ final class QuizViewModel: ObservableObject {
     func submitAnswer() {
         guard !answered, let sel = selectedOption else { return }
         stopTimer()
+        AudioManager.shared.stopAll()
+        playingChoiceId = nil
         answered = true
 
         let correct: Bool
@@ -199,6 +236,9 @@ final class QuizViewModel: ObservableObject {
             mysteryPlayed   = false
             showLineup      = false
             timerStarted    = false
+            hintUsed              = false
+            eliminatedOptionIndex = nil
+            eliminatedChoiceId    = nil
             questionStartTime = Date()
             resetTimerDisplay()
         }
@@ -211,6 +251,11 @@ final class QuizViewModel: ObservableObject {
     func playMystery() {
         guard !mysteryPlayed else { return }
         mysteryPlayed = true
+        // AudioManager's own no-replay guard is keyed off a single global flag that's never
+        // otherwise reset — clear it here so an earlier clip played anywhere else in the app
+        // doesn't block this one. `mysteryPlayed` above is what actually enforces "once per
+        // question."
+        AudioManager.shared.resetMysteryState()
         AudioManager.shared.play(fileName: currentClip.fileName, allowReplay: false)
         let seconds = currentClip.trackLengthSeconds > 0
             ? Double(currentClip.trackLengthSeconds) : Self.fallbackPlaybackSeconds
@@ -502,6 +547,7 @@ struct QuizView: View {
                     case .audioLineup:    LineupQuestionView(vm: vm)
                     }
                 }
+                .id(vm.currentClip.id)
                 .padding(16)
             }
             QuizActionBar(vm: vm)
@@ -593,9 +639,21 @@ struct QuizProgressBar: View {
 // MARK: - Multiple Choice
 struct MCQuestionView: View {
     @ObservedObject var vm: QuizViewModel
-    @State private var isPlaying = false
-    @State private var playCount = 0
+    @ObservedObject private var audio = AudioManager.shared
+    @State private var hasPlayedOnce = false
     let letters = ["A","B","C","D","E","F"]
+
+    /// Whether AudioManager's current playback state actually belongs to this clip (it's a
+    /// shared singleton, so this guards against stale state left over from a previous clip).
+    private var isCurrentClip: Bool { audio.currentFileID == vm.currentClip.fileName }
+    private var isPlaying: Bool     { isCurrentClip && audio.isPlaying }
+    /// True once this clip has played all the way through — at that point there's nothing
+    /// left to resume, so the button locks rather than allowing a restart from the beginning.
+    private var hasFinished: Bool   { isCurrentClip && audio.didFinishPlaying }
+
+    /// Locked once answered, or once the clip has played to completion — pausing and
+    /// resuming mid-playback stays available the whole time in between.
+    var playDisabled: Bool { vm.answered || hasFinished }
 
     func optState(_ i: Int) -> OptionState {
         guard vm.answered else { return vm.selectedOption == i ? .selected : .normal }
@@ -615,21 +673,18 @@ struct MCQuestionView: View {
                     Spacer()
                     DifficultyBadge(difficulty: vm.currentClip.difficulty)
                 }
-                Text(vm.currentClip.name)
-                    .font(.system(size: 14, weight: .medium)).multilineTextAlignment(.center)
                 WaveformView(isPlaying: isPlaying)
                 HStack(spacing: 14) {
                     Button {
-                        isPlaying.toggle()
                         if isPlaying {
-                            playCount += 1
+                            audio.pause()
+                        } else if hasPlayedOnce && isCurrentClip {
                             vm.startTimerIfNeeded()
-                            AudioManager.shared.play(fileName: vm.currentClip.fileName)
-                            let seconds = vm.currentClip.trackLengthSeconds > 0
-                                ? Double(vm.currentClip.trackLengthSeconds) : 3.0
-                            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { isPlaying = false }
-                        } else {
-                            AudioManager.shared.stopAll()
+                            audio.resume()
+                        } else if !hasPlayedOnce {
+                            hasPlayedOnce = true
+                            vm.startTimerIfNeeded()
+                            audio.play(fileName: vm.currentClip.fileName)
                         }
                     } label: {
                         ZStack {
@@ -637,9 +692,11 @@ struct MCQuestionView: View {
                             Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                                 .font(.system(size: 20)).foregroundColor(.white)
                         }
+                        .opacity(playDisabled ? 0.5 : 1.0)
                     }
+                    .disabled(playDisabled)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(isPlaying ? "Playing…" : playCount == 0 ? "Tap to listen" : "Replay (\(playCount)x)")
+                        Text(isPlaying ? "Playing…" : hasFinished ? "Played" : hasPlayedOnce ? "Paused" : "Tap to listen")
                             .font(.system(size: 13)).foregroundColor(.secondary)
                         if let combo = vm.comboMessage {
                             Text(combo).font(.system(size: 12, weight: .medium))
@@ -655,9 +712,12 @@ struct MCQuestionView: View {
             if let q = vm.currentClip.multipleChoiceQuestion {
                 Text(q.text).font(.system(size: 15, weight: .medium))
                     .frame(maxWidth: .infinity, alignment: .leading)
+                HintRow(vm: vm)
                 ForEach(Array(q.options.enumerated()), id: \.offset) { i, opt in
-                    OptionBtn(letter: letters[i], text: opt, state: optState(i),
-                              disabled: vm.answered) { vm.selectOption(i) }
+                    if i != vm.eliminatedOptionIndex {
+                        OptionBtn(letter: letters[i], text: opt, state: optState(i),
+                                  disabled: vm.answered) { vm.selectOption(i) }
+                    }
                 }
             }
         }
@@ -687,15 +747,18 @@ struct LineupQuestionView: View {
                 }
                 Text(lu.promptText).font(.system(size: 15, weight: .medium))
                     .frame(maxWidth: .infinity, alignment: .leading)
+                HintRow(vm: vm)
                 ForEach(Array(lu.choices.enumerated()), id: \.offset) { i, choice in
-                    AudioChoiceBtn(
-                        choice: choice, index: i,
-                        isPlaying: vm.playingChoiceId == choice.id,
-                        state: choiceState(i, choice),
-                        disabled: vm.answered,
-                        onPlay: { vm.toggleChoice(choice) },
-                        onSelect: { vm.selectedOption = i }
-                    )
+                    if choice.id != vm.eliminatedChoiceId {
+                        AudioChoiceBtn(
+                            choice: choice, index: i,
+                            isPlaying: vm.playingChoiceId == choice.id,
+                            state: choiceState(i, choice),
+                            disabled: vm.answered,
+                            onPlay: { vm.toggleChoice(choice) },
+                            onSelect: { vm.selectedOption = i }
+                        )
+                    }
                 }
             }
         }
@@ -770,6 +833,7 @@ struct OptionBtn: View {
                 }
                 Text(text).font(.system(size: 14)).foregroundColor(state.text)
                     .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer()
             }
             .padding(13).background(state.bg).cornerRadius(12)
@@ -801,6 +865,8 @@ struct AudioChoiceBtn: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(choice.label).font(.system(size: 13, weight: .medium)).foregroundColor(state.text)
                         Text(choice.description).font(.system(size: 12)).foregroundColor(.secondary)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
                     ZStack {
@@ -901,6 +967,36 @@ struct WaveformView: View {
                 withAnimation(.linear(duration: 0.6).repeatForever(autoreverses: false)) {
                     phase += .pi * 2
                 }
+            }
+        }
+    }
+}
+
+// MARK: - Hint Row
+struct HintRow: View {
+    @ObservedObject var vm: QuizViewModel
+
+    var body: some View {
+        if let hint = vm.currentClip.hint, !hint.isEmpty {
+            if vm.hintUsed {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "lightbulb.fill")
+                        .font(.system(size: 11)).foregroundColor(Color(hex: "#EF9F27"))
+                    Text(hint).font(.system(size: 12)).foregroundColor(.secondary)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(hex: "#FAEEDA"))
+                .cornerRadius(10)
+            } else {
+                Button { vm.useHint() } label: {
+                    Label("Use a hint", systemImage: "lightbulb")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Color(hex: "#EF9F27"))
+                }
+                .disabled(!vm.hintAvailable)
             }
         }
     }
