@@ -34,7 +34,8 @@ final class AudioManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
         let base = (fileName as NSString).deletingPathExtension
         let ext  = (fileName as NSString).pathExtension
 
-        if let url = Bundle.main.url(forResource: base, withExtension: ext) {
+        if let url = Bundle.main.url(forResource: base, withExtension: ext, subdirectory: "Audio")
+            ?? Bundle.main.url(forResource: base, withExtension: ext) {
             playLocal(url: url)
         } else if let url = URL(string: baseURL + fileName) {
             playRemote(url: url)

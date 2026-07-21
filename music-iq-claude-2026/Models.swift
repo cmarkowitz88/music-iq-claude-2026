@@ -101,15 +101,17 @@ struct AudioChoice: Identifiable, Codable {
     let label: String
     let description: String
     let fileName: String
+    let trackLengthSeconds: Int
     let isCorrect: Bool
 
     init(id: UUID = UUID(), label: String, description: String,
-         fileName: String, isCorrect: Bool) {
-        self.id          = id
-        self.label       = label
-        self.description = description
-        self.fileName    = fileName
-        self.isCorrect   = isCorrect
+         fileName: String, trackLengthSeconds: Int = 0, isCorrect: Bool) {
+        self.id                 = id
+        self.label              = label
+        self.description        = description
+        self.fileName           = fileName
+        self.trackLengthSeconds = trackLengthSeconds
+        self.isCorrect          = isCorrect
     }
 }
 
@@ -143,6 +145,16 @@ struct Clip: Identifiable, Codable {
     let multipleChoiceQuestion: MultipleChoiceQuestion?
     let audioLineupQuestion: AudioLineupQuestion?
 
+    /// The clip's real playback duration, when known from imported source content (0 if unset).
+    let trackLengthSeconds: Int
+    /// An optional hint about the clip/question, when supplied by imported source content.
+    let hint: String?
+    /// The originating record's ID in the source content system, for traceability (nil if not imported).
+    let sourceID: String?
+    /// The point value assigned to this question by the source content system (nil if not imported;
+    /// does not currently affect `points` — see `Clip.points`, which is still driven by `basePoints`).
+    let sourceScore: Int?
+
     var points: Int {
         let base: Int
         switch questionType {
@@ -155,6 +167,8 @@ struct Clip: Identifiable, Codable {
     init(id: UUID = UUID(), name: String, fileName: String,
          category: ClipCategory, setName: String,
          difficulty: Difficulty = .easy,
+         trackLengthSeconds: Int = 0, hint: String? = nil,
+         sourceID: String? = nil, sourceScore: Int? = nil,
          question: MultipleChoiceQuestion) {
         self.id                     = id
         self.name                   = name
@@ -165,11 +179,17 @@ struct Clip: Identifiable, Codable {
         self.difficulty             = difficulty
         self.multipleChoiceQuestion = question
         self.audioLineupQuestion    = nil
+        self.trackLengthSeconds     = trackLengthSeconds
+        self.hint                   = hint
+        self.sourceID               = sourceID
+        self.sourceScore            = sourceScore
     }
 
     init(id: UUID = UUID(), name: String, fileName: String,
          category: ClipCategory, setName: String,
          difficulty: Difficulty = .easy,
+         trackLengthSeconds: Int = 0, hint: String? = nil,
+         sourceID: String? = nil, sourceScore: Int? = nil,
          lineupQuestion: AudioLineupQuestion) {
         self.id                     = id
         self.name                   = name
@@ -180,6 +200,10 @@ struct Clip: Identifiable, Codable {
         self.difficulty             = difficulty
         self.multipleChoiceQuestion = nil
         self.audioLineupQuestion    = lineupQuestion
+        self.trackLengthSeconds     = trackLengthSeconds
+        self.hint                   = hint
+        self.sourceID               = sourceID
+        self.sourceScore            = sourceScore
     }
 }
 

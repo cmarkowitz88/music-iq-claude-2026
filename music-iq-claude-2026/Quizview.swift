@@ -67,14 +67,18 @@ final class QuizViewModel: ObservableObject {
     @Published var playingChoiceId: UUID? = nil
 
     let quizSet: QuizSet
-    var onComplete: (Int, [GameResult]) -> Void
+    var onComplete: (Int, [GameResult], Int, Int) -> Void
     var questionStartTime: Date = Date()
 
     private var timerTask: Task<Void, Never>?
     private var gameResults: [GameResult] = []
+    private var timerStarted = false
 
-    init(quizSet: QuizSet, onComplete: @escaping (Int, [GameResult]) -> Void) {
+    init(quizSet: QuizSet, initialStreak: Int = 0, initialBestStreak: Int = 0,
+         onComplete: @escaping (Int, [GameResult], Int, Int) -> Void) {
         self.quizSet    = quizSet
+        self.streak     = initialStreak
+        self.bestStreak = initialBestStreak
         self.onComplete = onComplete
     }
 
@@ -109,6 +113,22 @@ final class QuizViewModel: ObservableObject {
     }
 
     func stopTimer() { timerTask?.cancel(); timerTask = nil }
+
+    /// Shows the full countdown duration for the upcoming question without starting it —
+    /// the clock only actually starts once the user taps play.
+    func resetTimerDisplay() {
+        timerValue    = currentClip.difficulty.timerSeconds
+        timerProgress = 1.0
+    }
+
+    /// Starts the countdown the first time the user plays the clip; later replays don't
+    /// restart it.
+    func startTimerIfNeeded() {
+        guard !timerStarted else { return }
+        timerStarted      = true
+        questionStartTime = Date()
+        startTimer()
+    }
 
     func timeUp() {
         guard !answered else { return }
@@ -169,7 +189,7 @@ final class QuizViewModel: ObservableObject {
         playingChoiceId = nil
         if currentIndex + 1 >= totalClips {
             isFinished = true
-            onComplete(score, gameResults)
+            onComplete(score, gameResults, streak, bestStreak)
         } else {
             currentIndex   += 1
             selectedOption  = nil
@@ -178,17 +198,24 @@ final class QuizViewModel: ObservableObject {
             showFeedback    = false
             mysteryPlayed   = false
             showLineup      = false
+            timerStarted    = false
             questionStartTime = Date()
-            if currentClip.questionType == .multipleChoice { startTimer() }
+            resetTimerDisplay()
         }
     }
+
+    /// Falls back to this when a clip has no real `trackLengthSeconds` (e.g. hand-written
+    /// sample data that predates the imported duration field).
+    private static let fallbackPlaybackSeconds = 3.0
 
     func playMystery() {
         guard !mysteryPlayed else { return }
         mysteryPlayed = true
         AudioManager.shared.play(fileName: currentClip.fileName, allowReplay: false)
+        let seconds = currentClip.trackLengthSeconds > 0
+            ? Double(currentClip.trackLengthSeconds) : Self.fallbackPlaybackSeconds
         Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             await MainActor.run {
                 self?.showLineup = true
                 self?.startTimer()
@@ -204,8 +231,10 @@ final class QuizViewModel: ObservableObject {
             AudioManager.shared.stopAll()
             playingChoiceId = choice.id
             AudioManager.shared.play(fileName: choice.fileName)
+            let seconds = choice.trackLengthSeconds > 0
+                ? Double(choice.trackLengthSeconds) : Self.fallbackPlaybackSeconds
             Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                 await MainActor.run {
                     if self?.playingChoiceId == choice.id { self?.playingChoiceId = nil }
                 }
@@ -250,13 +279,216 @@ final class QuizViewModel: ObservableObject {
     }
 }
 
+// MARK: - Round Outcome
+struct RoundOutcome: Identifiable {
+    let id = UUID()
+    let round: QuizSet
+    let score: Int
+    let results: [GameResult]
+    let correctCount: Int
+    let requiredCount: Int
+    let passed: Bool
+    let streak: Int
+    let bestStreak: Int
+    var totalCount: Int { round.clips.count }
+}
+
+// MARK: - Quiz Progression
+/// Hands out successive rounds of `roundSize` clips, one difficulty tier at a time
+/// (easy → medium → hard). A tier keeps producing fresh rounds for as long as it has
+/// enough unused clips left to fill one; once it can't, the next tier takes over. The
+/// session runs out of rounds once every tier is short on remaining content.
+final class QuizProgression {
+    static let roundSize = 12
+    static let passRatio = 0.75
+
+    static func requiredCorrect(for roundSize: Int) -> Int {
+        Int((Double(roundSize) * passRatio).rounded(.up))
+    }
+
+    private let difficulties: [Difficulty] = Difficulty.allCases.sorted { $0.rawValue < $1.rawValue }
+    private var remaining: [Difficulty: [Clip]]
+    private var roundCounts: [Difficulty: Int] = [:]
+    private var difficultyIndex = 0
+
+    init(clips: [Clip]) {
+        remaining = Dictionary(grouping: clips, by: \.difficulty)
+    }
+
+    /// True if calling `nextRound()` right now would return a round rather than nil.
+    var hasMoreRounds: Bool {
+        guard difficultyIndex < difficulties.count else { return false }
+        return difficulties[difficultyIndex...].contains {
+            (remaining[$0]?.count ?? 0) >= Self.roundSize
+        }
+    }
+
+    func nextRound() -> QuizSet? {
+        while difficultyIndex < difficulties.count {
+            let difficulty = difficulties[difficultyIndex]
+            var pool = remaining[difficulty] ?? []
+            guard pool.count >= Self.roundSize else {
+                difficultyIndex += 1
+                continue
+            }
+            pool.shuffle()
+            remaining[difficulty] = Array(pool.dropFirst(Self.roundSize))
+            roundCounts[difficulty, default: 0] += 1
+
+            let name = "\(difficulty.label) Round \(roundCounts[difficulty]!)"
+            return QuizSet(name: name, category: .other, clips: Array(pool.prefix(Self.roundSize)))
+        }
+        return nil
+    }
+}
+
+// MARK: - Quiz Session View Model
+@MainActor
+final class QuizSessionViewModel: ObservableObject {
+    @Published var currentRound: QuizSet?
+    @Published var pendingOutcome: RoundOutcome?
+    @Published var isFinished = false
+
+    private(set) var sessionScore = 0
+    private(set) var sessionResults: [GameResult] = []
+    private(set) var carryStreak = 0
+    private(set) var carryBestStreak = 0
+
+    private let progression: QuizProgression
+    let onComplete: (Int, [GameResult]) -> Void
+
+    var hasMoreRoundsAvailable: Bool { progression.hasMoreRounds }
+
+    init(clips: [Clip], onComplete: @escaping (Int, [GameResult]) -> Void) {
+        self.progression = QuizProgression(clips: clips)
+        self.onComplete  = onComplete
+        self.currentRound = progression.nextRound()
+    }
+
+    func handleRoundComplete(score: Int, results: [GameResult], streak: Int, bestStreak: Int) {
+        guard let round = currentRound else { return }
+        let correct  = results.filter { $0.correct }.count
+        let required = QuizProgression.requiredCorrect(for: round.clips.count)
+        pendingOutcome = RoundOutcome(round: round, score: score, results: results,
+                                       correctCount: correct, requiredCount: required,
+                                       passed: correct >= required, streak: streak, bestStreak: bestStreak)
+    }
+
+    func continueAfterOutcome() {
+        guard let outcome = pendingOutcome else { return }
+        pendingOutcome = nil
+        carryBestStreak = max(carryBestStreak, outcome.bestStreak)
+
+        if outcome.passed {
+            sessionScore   += outcome.score
+            sessionResults += outcome.results
+            carryStreak      = outcome.streak
+            if let next = progression.nextRound() {
+                currentRound = next
+            } else {
+                onComplete(sessionScore, sessionResults)
+                isFinished = true
+            }
+        } else {
+            // Redo the same clips in a new order — the streak that led to this failed
+            // attempt doesn't carry into the reset the retry represents.
+            carryStreak  = 0
+            currentRound = QuizSet(name: outcome.round.name, category: outcome.round.category,
+                                    clips: outcome.round.clips.shuffled())
+        }
+    }
+}
+
+// MARK: - Quiz Session View
+struct QuizSessionView: View {
+    @StateObject private var vm: QuizSessionViewModel
+
+    init(clips: [Clip], onComplete: @escaping (Int, [GameResult]) -> Void) {
+        _vm = StateObject(wrappedValue: QuizSessionViewModel(clips: clips, onComplete: onComplete))
+    }
+
+    var body: some View {
+        Group {
+            if let outcome = vm.pendingOutcome {
+                RoundOutcomeView(outcome: outcome, hasMoreRounds: vm.hasMoreRoundsAvailable) {
+                    vm.continueAfterOutcome()
+                }
+            } else if let round = vm.currentRound {
+                QuizView(quizSet: round, initialStreak: vm.carryStreak, initialBestStreak: vm.carryBestStreak) { score, results, streak, bestStreak in
+                    vm.handleRoundComplete(score: score, results: results, streak: streak, bestStreak: bestStreak)
+                }
+                .id(round.id)
+            } else {
+                VStack(spacing: 16) {
+                    Text("No quiz content available.")
+                        .font(.system(size: 15)).foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(.systemGroupedBackground))
+            }
+        }
+        .navigationDestination(isPresented: $vm.isFinished) {
+            Text("MusicIQ Results — coming next!")
+                .navigationBarHidden(false)
+        }
+    }
+}
+
+// MARK: - Round Outcome View
+struct RoundOutcomeView: View {
+    let outcome: RoundOutcome
+    let hasMoreRounds: Bool
+    let onContinue: () -> Void
+
+    private var continueLabel: String {
+        guard outcome.passed else { return "Try again" }
+        return hasMoreRounds ? "Next round →" : "See my MusicIQ →"
+    }
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer()
+            ZStack {
+                Circle()
+                    .fill(outcome.passed ? Color(hex: "#E1F5EE") : Color(hex: "#FAECE7"))
+                    .frame(width: 88, height: 88)
+                Image(systemName: outcome.passed ? "checkmark" : "arrow.counterclockwise")
+                    .font(.system(size: 34, weight: .medium))
+                    .foregroundColor(outcome.passed ? Color(hex: "#0F6E56") : Color(hex: "#993C1D"))
+            }
+            VStack(spacing: 6) {
+                Text(outcome.passed ? "Round passed!" : "Round failed")
+                    .font(.system(size: 20, weight: .medium))
+                Text("\(outcome.correctCount) of \(outcome.totalCount) correct — you need \(outcome.requiredCount) to pass.")
+                    .font(.system(size: 14)).foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                if !outcome.passed {
+                    Text("Let's give this round another shot.")
+                        .font(.system(size: 13)).foregroundColor(.secondary)
+                }
+            }
+            Spacer()
+            Button(action: onContinue) {
+                Text(continueLabel)
+                    .font(.system(size: 15, weight: .medium)).foregroundColor(.white)
+                    .frame(maxWidth: .infinity).padding(.vertical, 13)
+                    .background(Color(hex: "#534AB7")).cornerRadius(12)
+            }
+        }
+        .padding(24)
+        .background(Color(.systemGroupedBackground))
+    }
+}
+
 // MARK: - Quiz View
 struct QuizView: View {
     @StateObject private var vm: QuizViewModel
     @Environment(\.dismiss) private var dismiss
 
-    init(quizSet: QuizSet, onComplete: @escaping (Int, [GameResult]) -> Void) {
-        _vm = StateObject(wrappedValue: QuizViewModel(quizSet: quizSet, onComplete: onComplete))
+    init(quizSet: QuizSet, initialStreak: Int = 0, initialBestStreak: Int = 0,
+         onComplete: @escaping (Int, [GameResult], Int, Int) -> Void) {
+        _vm = StateObject(wrappedValue: QuizViewModel(quizSet: quizSet, initialStreak: initialStreak,
+                                                       initialBestStreak: initialBestStreak, onComplete: onComplete))
     }
 
     var body: some View {
@@ -278,11 +510,7 @@ struct QuizView: View {
         .navigationBarHidden(true)
         .onAppear {
             vm.questionStartTime = Date()
-            if vm.currentClip.questionType == .multipleChoice { vm.startTimer() }
-        }
-        .navigationDestination(isPresented: $vm.isFinished) {
-            Text("MusicIQ Results — coming next!")
-                .navigationBarHidden(false)
+            vm.resetTimerDisplay()
         }
     }
 }
@@ -395,8 +623,11 @@ struct MCQuestionView: View {
                         isPlaying.toggle()
                         if isPlaying {
                             playCount += 1
+                            vm.startTimerIfNeeded()
                             AudioManager.shared.play(fileName: vm.currentClip.fileName)
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { isPlaying = false }
+                            let seconds = vm.currentClip.trackLengthSeconds > 0
+                                ? Double(vm.currentClip.trackLengthSeconds) : 3.0
+                            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { isPlaying = false }
                         } else {
                             AudioManager.shared.stopAll()
                         }
@@ -631,7 +862,7 @@ struct QuizActionBar: View {
                         .cornerRadius(12).disabled(!canSubmit)
                         .animation(.easeInOut(duration: 0.2), value: canSubmit)
                 } else {
-                    Button(vm.currentIndex + 1 >= vm.totalClips ? "See my MusicIQ →" : "Next →") {
+                    Button(vm.currentIndex + 1 >= vm.totalClips ? "Finish round →" : "Next →") {
                         withAnimation { vm.advance() }
                     }
                     .font(.system(size: 15, weight: .medium)).foregroundColor(.white)
@@ -665,7 +896,7 @@ struct WaveformView: View {
                 }
             }
         }
-        .onChange(of: isPlaying) { _, newValue in
+        .onChange(of: isPlaying) { newValue in
             if newValue {
                 withAnimation(.linear(duration: 0.6).repeatForever(autoreverses: false)) {
                     phase += .pi * 2
@@ -706,5 +937,5 @@ struct DifficultyBadge: View {
 }
 
 #Preview {
-    QuizView(quizSet: QuizSet.sampleSets[0]) { _, _ in }
+    QuizView(quizSet: QuizSet.sampleSets[0]) { _, _, _, _ in }
 }

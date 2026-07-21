@@ -5,8 +5,7 @@ struct HomeView: View {
 
     @AppStorage("totalPoints") private var totalPoints: Int = 0
     @AppStorage("streakDays")  private var streakDays: Int  = 5
-    @State private var selectedSet: QuizSet? = nil
-    @State private var navigateToQuiz        = false
+    @State private var navigateToQuiz = false
 
     private var level: Int { max(1, totalPoints / 500 + 1) }
 
@@ -46,21 +45,16 @@ struct HomeView: View {
                         .padding(.horizontal, 20)
 
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Pick a round")
+                        Text("Today's round")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(.secondary)
                             .textCase(.uppercase)
                             .kerning(0.8)
                             .padding(.horizontal, 20)
 
-                        ForEach(QuizSet.activeSets) { quizSet in
-                            QuizSetRowView(quizSet: quizSet)
-                                .padding(.horizontal, 20)
-                                .onTapGesture {
-                                    selectedSet    = quizSet
-                                    navigateToQuiz = true
-                                }
-                        }
+                        StartQuizCardView()
+                            .padding(.horizontal, 20)
+                            .onTapGesture { navigateToQuiz = true }
                     }
 
                     LeaderboardCardView(yourPoints: totalPoints)
@@ -71,10 +65,8 @@ struct HomeView: View {
             .background(Color(.systemGroupedBackground))
             .navigationBarHidden(true)
             .navigationDestination(isPresented: $navigateToQuiz) {
-                if let quizSet = selectedSet {
-                    QuizView(quizSet: quizSet) { earned, _ in
-                        totalPoints += earned
-                    }
+                QuizSessionView(clips: QuizSet.activeSets.flatMap { $0.clips }) { earned, _ in
+                    totalPoints += earned
                 }
             }
         }
@@ -114,32 +106,21 @@ struct StreakCardView: View {
     }
 }
 
-struct QuizSetRowView: View {
-    let quizSet: QuizSet
+struct StartQuizCardView: View {
     var body: some View {
         HStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(Color(hex: quizSet.category.bgHex))
+                    .fill(Color(hex: ClipCategory.other.bgHex))
                     .frame(width: 44, height: 44)
-                Image(systemName: quizSet.category.icon)
+                Image(systemName: "shuffle")
                     .font(.system(size: 18))
-                    .foregroundColor(Color(hex: quizSet.category.accentHex))
+                    .foregroundColor(Color(hex: ClipCategory.other.accentHex))
             }
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(quizSet.name)
-                        .font(.system(size: 14, weight: .medium))
-                    if quizSet.hasLineupRounds {
-                        Text("Memory")
-                            .font(.system(size: 10, weight: .medium))
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(Color(hex: "#F3EAFE"))
-                            .foregroundColor(Color(hex: "#7B3FB8"))
-                            .clipShape(Capsule())
-                    }
-                }
-                Text("\(quizSet.clips.count) rounds · up to \(quizSet.maxPoints) pts")
+                Text("Start Quiz")
+                    .font(.system(size: 14, weight: .medium))
+                Text("12 questions per round · 9 to pass · easy → hard")
                     .font(.system(size: 12)).foregroundColor(.secondary)
             }
             Spacer()
