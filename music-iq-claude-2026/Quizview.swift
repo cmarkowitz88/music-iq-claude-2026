@@ -345,10 +345,12 @@ struct QuizProgressBar: View {
                         .animation(.linear(duration: 1), value: vm.timerProgress)
                 }
             }.frame(height: 4)
-            HStack(spacing: 6) {
-                ForEach(0..<vm.totalClips, id: \.self) { i in
-                    Circle().fill(dotColor(i)).frame(width: 10, height: 10)
-                        .animation(.spring(), value: vm.results.count)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(0..<vm.totalClips, id: \.self) { i in
+                        Circle().fill(dotColor(i)).frame(width: 10, height: 10)
+                            .animation(.spring(), value: vm.results.count)
+                    }
                 }
             }
         }

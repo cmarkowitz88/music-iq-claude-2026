@@ -53,7 +53,7 @@ struct HomeView: View {
                             .kerning(0.8)
                             .padding(.horizontal, 20)
 
-                        ForEach(QuizSet.sampleSets) { quizSet in
+                        ForEach(QuizSet.activeSets) { quizSet in
                             QuizSetRowView(quizSet: quizSet)
                                 .padding(.horizontal, 20)
                                 .onTapGesture {
