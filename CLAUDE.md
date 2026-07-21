@@ -36,13 +36,19 @@ Everything lives in `music-iq-claude-2026/`, eight Swift files, no submodules.
 
 - **`SampleData.swift`** defines `QuizSet.sampleSets`: four small hand-written sets covering
   instrument ID, time signature, tempo/feel, and audio lineup (4 clips each).
-- **`DebugData.swift`** defines `QuizSet.debugSets`, imported from an external JSON export
-  (`music_iq_questions_for_insert_with_type_and_active.json`, not in the repo) — three large
-  "Music Knowledge" sets split by difficulty (~70–85 clips each, all `category: .other`) plus a
-  debug audio-lineup set. `DebugConfig.useDebugQuestionSets` (currently `true`) selects which
-  catalog `QuizSet.activeSets` resolves to — **`activeSets` is what the app actually uses**;
-  flip that flag to compare against the hand-written sample content. There is no remote content
-  pipeline — adding/editing quiz content today means editing one of these two files directly.
+- **`DebugData.swift`** defines `QuizSet.debugSets` — **generated, do not hand-edit** — from an
+  external JSON export at
+  `/Users/craigmarkowitz/Documents/Development/Music_IQ/AWS/music_iq_questions_for_insert_with_type_and_active.json`
+  (not in this repo). Three large "Music Knowledge" sets split by difficulty (~70–85 clips each,
+  all `category: .other`) plus a debug audio-lineup set. `DebugConfig.useDebugQuestionSets`
+  (currently `true`) selects which catalog `QuizSet.activeSets` resolves to —
+  **`activeSets` is what the app actually uses**; flip that flag to compare against the
+  hand-written sample content. To add/edit debug quiz content: edit the source JSON (matching its
+  existing schema), then run `python3 Scripts/generate_debug_data.py` to rebuild
+  `DebugData.swift` from it. `SampleData.swift`, by contrast, has no generator — it's edited by
+  hand directly.
+- **`quiz_questions.xlsx`** (repo root) is a review/drafting spreadsheet for new questions before
+  they're added to the source JSON — not consumed by the app or the generator script.
 
 ### `Models.swift` — domain model + scoring math
 
@@ -103,3 +109,6 @@ should not be redefined elsewhere — reuse this one.
 Persisted state is minimal and uses `@AppStorage` directly in `HomeView` (`totalPoints`,
 `streakDays`) — there is no persistence layer beyond that. `totalPoints` is incremented from the
 session-level `onComplete` callback (fires once, at the very end of a full session), not per round.
+
+## Initial audio clips sourced from
+/Users/craigmarkowitz/Documents/Development/Music_IQ/musiciq-audio-mp3
