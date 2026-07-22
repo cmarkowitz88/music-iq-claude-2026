@@ -1112,6 +1112,13 @@ extension QuizSet {
                  question: MultipleChoiceQuestion(
                     text: "What type of drum kit is this beat played on?",
                     options: ["Synsonic", "Hand", "Electric", "Acoustic"], correctIndex: 3)),
+            Clip(name: "This bass track is played in style of wh", fileName: "AceOfSpadedBassVrsChrs.mp3",
+                 category: .other, setName: "Music Knowledge (Debug - Medium)", difficulty: .medium,
+                 trackLengthSeconds: 43, hint: "Born Ian Fraser Kilmister in 1945, he was the frontman, bassist, and primary songwriter of Motörhead, the British rock band he founded in 1975 after being kicked out of Hawkwind.",
+                 sourceID: "mk-drums-brushes", sourceScore: 1,
+                 question: MultipleChoiceQuestion(
+                    text: "This bass track is played in style of who?",
+                    options: ["Lemmy", "Marcus Miller", "Jeff Berlin", "Stanley Clarke"], correctIndex: 0)),
         ])
 
     static let debugKnowledgeHardSet = QuizSet(

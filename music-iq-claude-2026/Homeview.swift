@@ -7,6 +7,7 @@ struct HomeView: View {
     @AppStorage("streakDays")  private var streakDays: Int  = 5
     @State private var navigateToQuiz = false
     @State private var resumableSnapshot: QuizSessionSnapshot? = nil
+    @State private var showResetConfirmation = false
 
     private var level: Int { max(1, totalPoints / 500 + 1) }
 
@@ -60,24 +61,43 @@ struct HomeView: View {
 
                     LeaderboardCardView(yourPoints: totalPoints)
                         .padding(.horizontal, 20)
+
+                    Button("Reset Progress") { showResetConfirmation = true }
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
                         .padding(.bottom, 24)
                 }
             }
             .background(Color(.systemGroupedBackground))
             .navigationBarHidden(true)
             .onAppear { resumableSnapshot = QuizPersistence.load() }
+            .alert("Reset Progress?", isPresented: $showResetConfirmation) {
+                Button("Reset", role: .destructive) { resetProgress() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This clears your points, streak, and any quiz in progress. This can't be undone.")
+            }
             .navigationDestination(isPresented: $navigateToQuiz) {
                 if let snapshot = resumableSnapshot {
-                    QuizSessionView(resuming: snapshot) { earned, _ in
+                    QuizSessionView(resuming: snapshot) { _, _ in
+                    } onRoundBanked: { earned in
                         totalPoints += earned
                     }
                 } else {
-                    QuizSessionView(clips: QuizSet.activeSets.flatMap { $0.clips }) { earned, _ in
+                    QuizSessionView(clips: QuizSet.activeSets.flatMap { $0.clips }) { _, _ in
+                    } onRoundBanked: { earned in
                         totalPoints += earned
                     }
                 }
             }
         }
+    }
+
+    private func resetProgress() {
+        QuizPersistence.clear()
+        resumableSnapshot = nil
+        totalPoints = 0
+        streakDays  = 0
     }
 }
 

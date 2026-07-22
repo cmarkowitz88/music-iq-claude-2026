@@ -460,21 +460,30 @@ final class QuizSessionViewModel: ObservableObject {
 
     private let progression: QuizProgression
     let onComplete: (Int, [GameResult]) -> Void
+    /// Fires as soon as a round is passed, with just that round's earned points — this is what
+    /// actually banks points to the player's running total. A "full session" (every difficulty
+    /// tier's entire pool exhausted) is effectively unreachable in normal play, so `onComplete`
+    /// firing only at the very end isn't a usable point at which to credit anything.
+    let onRoundBanked: (Int) -> Void
 
     var hasMoreRoundsAvailable: Bool { progression.hasMoreRounds }
 
-    init(clips: [Clip], onComplete: @escaping (Int, [GameResult]) -> Void) {
-        self.progression = QuizProgression(clips: clips)
-        self.onComplete  = onComplete
+    init(clips: [Clip], onComplete: @escaping (Int, [GameResult]) -> Void,
+         onRoundBanked: @escaping (Int) -> Void) {
+        self.progression   = QuizProgression(clips: clips)
+        self.onComplete    = onComplete
+        self.onRoundBanked = onRoundBanked
         self.currentRound = progression.nextRound()
         saveSnapshot()
     }
 
     /// Picks a session back up from a saved snapshot — restarting at the beginning of the
     /// round that was in progress, with the pool/score/streak state as of when that round began.
-    init(resuming snapshot: QuizSessionSnapshot, onComplete: @escaping (Int, [GameResult]) -> Void) {
+    init(resuming snapshot: QuizSessionSnapshot, onComplete: @escaping (Int, [GameResult]) -> Void,
+         onRoundBanked: @escaping (Int) -> Void) {
         self.progression     = QuizProgression(snapshot: snapshot.progression)
         self.onComplete      = onComplete
+        self.onRoundBanked   = onRoundBanked
         self.sessionScore     = snapshot.sessionScore
         self.sessionResults   = snapshot.sessionResults
         self.carryStreak      = snapshot.carryStreak
@@ -515,6 +524,7 @@ final class QuizSessionViewModel: ObservableObject {
             sessionScore   += outcome.score
             sessionResults += outcome.results
             carryStreak      = outcome.streak
+            onRoundBanked(outcome.score)
             if let next = progression.nextRound() {
                 currentRound = next
                 saveSnapshot()
@@ -540,12 +550,16 @@ final class QuizSessionViewModel: ObservableObject {
 struct QuizSessionView: View {
     @StateObject private var vm: QuizSessionViewModel
 
-    init(clips: [Clip], onComplete: @escaping (Int, [GameResult]) -> Void) {
-        _vm = StateObject(wrappedValue: QuizSessionViewModel(clips: clips, onComplete: onComplete))
+    init(clips: [Clip], onComplete: @escaping (Int, [GameResult]) -> Void,
+         onRoundBanked: @escaping (Int) -> Void) {
+        _vm = StateObject(wrappedValue: QuizSessionViewModel(clips: clips, onComplete: onComplete,
+                                                              onRoundBanked: onRoundBanked))
     }
 
-    init(resuming snapshot: QuizSessionSnapshot, onComplete: @escaping (Int, [GameResult]) -> Void) {
-        _vm = StateObject(wrappedValue: QuizSessionViewModel(resuming: snapshot, onComplete: onComplete))
+    init(resuming snapshot: QuizSessionSnapshot, onComplete: @escaping (Int, [GameResult]) -> Void,
+         onRoundBanked: @escaping (Int) -> Void) {
+        _vm = StateObject(wrappedValue: QuizSessionViewModel(resuming: snapshot, onComplete: onComplete,
+                                                              onRoundBanked: onRoundBanked))
     }
 
     var body: some View {
