@@ -21,11 +21,45 @@ final class AudioManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private override init() {
         super.init()
         configureSession()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(handleInterruption),
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance()
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     private func configureSession() {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
         try? AVAudioSession.sharedInstance().setActive(true)
+    }
+
+    /// Without this, a system interruption (a call, another app taking audio focus, or the
+    /// Simulator's own CoreAudio hiccups) silently pauses playback at the OS level while
+    /// `isPlaying` stays stale — the UI keeps showing "playing" for audio that's actually
+    /// stopped, and nothing ever resumes it.
+    @objc private func handleInterruption(_ notification: Notification) {
+        guard let info = notification.userInfo,
+              let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
+
+        switch type {
+        case .began:
+            DispatchQueue.main.async { self.isPlaying = false }
+        case .ended:
+            try? AVAudioSession.sharedInstance().setActive(true)
+            let optionsValue = info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            if AVAudioSession.InterruptionOptions(rawValue: optionsValue).contains(.shouldResume) {
+                player?.play()
+                remotePlayer?.play()
+                DispatchQueue.main.async { self.isPlaying = true }
+            }
+        @unknown default:
+            break
+        }
     }
 
     func play(fileName: String, allowReplay: Bool = true) {

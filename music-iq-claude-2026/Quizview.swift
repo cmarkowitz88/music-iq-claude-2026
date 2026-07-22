@@ -683,6 +683,7 @@ struct QuizView: View {
 struct QuizTopBar: View {
     @ObservedObject var vm: QuizViewModel
     let dismiss: DismissAction
+    @State private var showSFXTooltip = false
     var body: some View {
         HStack {
             Button { dismiss() } label: {
@@ -698,6 +699,16 @@ struct QuizTopBar: View {
                     Image(systemName: vm.sfxEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
                         .font(.system(size: 13))
                         .foregroundColor(vm.sfxEnabled ? Color(hex: "#534AB7") : .secondary)
+                }
+                .help("Sound effects — the correct/wrong/combo chimes, muted separately from the quiz audio itself")
+                .accessibilityLabel(vm.sfxEnabled ? "Sound effects on" : "Sound effects off")
+                .onLongPressGesture(minimumDuration: 0.4) { showSFXTooltip = true }
+                .popover(isPresented: $showSFXTooltip) {
+                    Text("Toggles the short chime/buzz/combo sound effects — this doesn't affect the quiz clip audio itself.")
+                        .font(.system(size: 13))
+                        .padding()
+                        .frame(maxWidth: 240)
+                        .presentationCompactAdaptation(.popover)
                 }
                 Text("\(vm.score) pts")
                     .font(.system(size: 13, weight: .medium))

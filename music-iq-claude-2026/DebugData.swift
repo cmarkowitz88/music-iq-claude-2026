@@ -113,7 +113,7 @@ extension QuizSet {
                  trackLengthSeconds: 25, hint: "This effect produces a wavering, shaking effect that is caused by slight variations to the volume of the original signal. Early guitar amplifiers were able to produce this effect quite convincingly and later pedals were designed to re-produce this effect.",
                  sourceID: "2", sourceScore: 4,
                  question: MultipleChoiceQuestion(
-                    text: "This is an effect that is commonly used on an electric guitar and was incorporated into eary guitar amplifiers.",
+                    text: "This is an effect that is commonly used on an electric guitar and was incorporated into early guitar amplifiers.",
                     options: ["Tremolo", "Flanger", "Wah Wah", "Delay"], correctIndex: 0)),
             Clip(name: "What is the name of the instrument featu", fileName: "2569650.mp3",
                  category: .other, setName: "Music Knowledge (Debug - Easy)", difficulty: .easy,
