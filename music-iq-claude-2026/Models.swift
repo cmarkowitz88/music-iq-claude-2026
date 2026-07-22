@@ -157,7 +157,7 @@ struct AudioLineupQuestion: Identifiable, Codable {
 }
 
 // MARK: - Clip
-struct Clip: Identifiable, Codable {
+struct Clip: Identifiable, Codable, Hashable {
     let id: UUID
     let name: String
     let fileName: String
@@ -249,6 +249,11 @@ struct Clip: Identifiable, Codable {
         self.sourceID               = sourceID
         self.sourceScore            = sourceScore
     }
+
+    // Identity-based rather than synthesized — the nested question types don't need to carry
+    // Hashable conformance just so a Clip can be used as a SwiftUI navigation item.
+    static func == (lhs: Clip, rhs: Clip) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
 // MARK: - Quiz Set

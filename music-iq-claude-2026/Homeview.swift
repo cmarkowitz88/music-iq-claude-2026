@@ -8,6 +8,9 @@ struct HomeView: View {
     @State private var navigateToQuiz = false
     @State private var resumableSnapshot: QuizSessionSnapshot? = nil
     @State private var showResetConfirmation = false
+    #if DEBUG
+    @State private var showDebugFinder = false
+    #endif
 
     private var level: Int { max(1, totalPoints / 500 + 1) }
 
@@ -62,10 +65,18 @@ struct HomeView: View {
                     LeaderboardCardView(yourPoints: totalPoints)
                         .padding(.horizontal, 20)
 
-                    Button("Reset Progress") { showResetConfirmation = true }
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                        .padding(.bottom, 24)
+                    VStack(spacing: 8) {
+                        Button("Reset Progress") { showResetConfirmation = true }
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+
+                        #if DEBUG
+                        Button("🔍 Debug: Find Question") { showDebugFinder = true }
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                        #endif
+                    }
+                    .padding(.bottom, 24)
                 }
             }
             .background(Color(.systemGroupedBackground))
@@ -77,6 +88,11 @@ struct HomeView: View {
             } message: {
                 Text("This clears your points, streak, and any quiz in progress. This can't be undone.")
             }
+            #if DEBUG
+            .navigationDestination(isPresented: $showDebugFinder) {
+                DebugQuestionFinderView { showDebugFinder = false }
+            }
+            #endif
             .navigationDestination(isPresented: $navigateToQuiz) {
                 if let snapshot = resumableSnapshot {
                     QuizSessionView(resuming: snapshot) { _, _ in
