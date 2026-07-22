@@ -6,6 +6,7 @@ struct HomeView: View {
     @AppStorage("totalPoints") private var totalPoints: Int = 0
     @AppStorage("streakDays")  private var streakDays: Int  = 5
     @State private var navigateToQuiz = false
+    @State private var resumableSnapshot: QuizSessionSnapshot? = nil
 
     private var level: Int { max(1, totalPoints / 500 + 1) }
 
@@ -52,7 +53,7 @@ struct HomeView: View {
                             .kerning(0.8)
                             .padding(.horizontal, 20)
 
-                        StartQuizCardView()
+                        StartQuizCardView(resumableRoundName: resumableSnapshot?.currentRoundName)
                             .padding(.horizontal, 20)
                             .onTapGesture { navigateToQuiz = true }
                     }
@@ -64,9 +65,16 @@ struct HomeView: View {
             }
             .background(Color(.systemGroupedBackground))
             .navigationBarHidden(true)
+            .onAppear { resumableSnapshot = QuizPersistence.load() }
             .navigationDestination(isPresented: $navigateToQuiz) {
-                QuizSessionView(clips: QuizSet.activeSets.flatMap { $0.clips }) { earned, _ in
-                    totalPoints += earned
+                if let snapshot = resumableSnapshot {
+                    QuizSessionView(resuming: snapshot) { earned, _ in
+                        totalPoints += earned
+                    }
+                } else {
+                    QuizSessionView(clips: QuizSet.activeSets.flatMap { $0.clips }) { earned, _ in
+                        totalPoints += earned
+                    }
                 }
             }
         }
@@ -107,21 +115,28 @@ struct StreakCardView: View {
 }
 
 struct StartQuizCardView: View {
+    let resumableRoundName: String?
+
     var body: some View {
         HStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color(hex: ClipCategory.other.bgHex))
                     .frame(width: 44, height: 44)
-                Image(systemName: "shuffle")
+                Image(systemName: resumableRoundName != nil ? "arrow.clockwise" : "shuffle")
                     .font(.system(size: 18))
                     .foregroundColor(Color(hex: ClipCategory.other.accentHex))
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text("Start Quiz")
+                Text(resumableRoundName != nil ? "Continue Quiz" : "Start Quiz")
                     .font(.system(size: 14, weight: .medium))
-                Text("12 questions per round · 9 to pass · easy → hard")
-                    .font(.system(size: 12)).foregroundColor(.secondary)
+                if let roundName = resumableRoundName {
+                    Text("Pick back up on \(roundName)")
+                        .font(.system(size: 12)).foregroundColor(.secondary)
+                } else {
+                    Text("12 questions per round · 9 to pass · easy → hard")
+                        .font(.system(size: 12)).foregroundColor(.secondary)
+                }
             }
             Spacer()
             Image(systemName: "chevron.right")

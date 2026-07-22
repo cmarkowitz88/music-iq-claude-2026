@@ -61,6 +61,20 @@ enum Difficulty: Int, Codable, CaseIterable {
         case .hard:   return "Hard"
         }
     }
+    var accentHex: String {
+        switch self {
+        case .easy:   return "#1D9E75"
+        case .medium: return "#BA7517"
+        case .hard:   return "#993C1D"
+        }
+    }
+    var bgHex: String {
+        switch self {
+        case .easy:   return "#E1F5EE"
+        case .medium: return "#FAEEDA"
+        case .hard:   return "#FAECE7"
+        }
+    }
     var timerSeconds: Int {
         switch self {
         case .easy:   return 30
@@ -73,6 +87,15 @@ enum Difficulty: Int, Codable, CaseIterable {
         case .easy:   return 1.0
         case .medium: return 1.5
         case .hard:   return 2.0
+        }
+    }
+    /// The payout for a round's single random "bonus question" (see `QuizSet.bonusClipID`),
+    /// scaled by difficulty like everything else.
+    var bonusQuestionPoints: Int {
+        switch self {
+        case .easy:   return 1000
+        case .medium: return 1500
+        case .hard:   return 2000
         }
     }
 }
@@ -155,19 +178,24 @@ struct Clip: Identifiable, Codable {
     /// does not currently affect `points` — see `Clip.points`, which is still driven by `basePoints`).
     let sourceScore: Int?
 
+    /// Extra buffer added on top of the raw audition time for Audio Lineup questions, to leave
+    /// room for switching between choices and deciding rather than just listening once through.
+    static let lineupTimerBufferSeconds = 15
+
     /// The countdown duration for this question. For multiple choice this is the clip's own
     /// real length; for Audio Lineup, `trackLengthSeconds` is only the mystery clip's length
     /// (irrelevant once it's done playing) — what matters during the answer phase is having
-    /// enough time to audition the candidates, so this sums each choice's own length instead.
-    /// Falls back to the difficulty's default when no real length is known (e.g. hand-written
-    /// sample data with no imported track length).
+    /// enough time to audition the candidates, so this sums each choice's own length instead
+    /// (plus a fixed buffer). Falls back to the difficulty's default when no real length is
+    /// known (e.g. hand-written sample data with no imported track length).
     var timerSeconds: Int {
         switch questionType {
         case .multipleChoice:
             return trackLengthSeconds > 0 ? trackLengthSeconds : difficulty.timerSeconds
         case .audioLineup:
             let total = audioLineupQuestion?.choices.reduce(0) { $0 + $1.trackLengthSeconds } ?? 0
-            return total > 0 ? total : difficulty.timerSeconds
+            let base  = total > 0 ? total : difficulty.timerSeconds
+            return base + Self.lineupTimerBufferSeconds
         }
     }
 
@@ -229,20 +257,24 @@ struct QuizSet: Identifiable {
     let name: String
     let category: ClipCategory
     let clips: [Clip]
+    /// The one clip in this set (if any) that pays out `Difficulty.bonusQuestionPoints` instead
+    /// of its normal point value — used for a round's single random "bonus question."
+    let bonusClipID: UUID?
 
     var maxPoints: Int        { clips.reduce(0) { $0 + $1.points } }
     var hasLineupRounds: Bool { clips.contains { $0.questionType == .audioLineup } }
 
-    init(id: UUID = UUID(), name: String, category: ClipCategory, clips: [Clip]) {
-        self.id       = id
-        self.name     = name
-        self.category = category
-        self.clips    = clips
+    init(id: UUID = UUID(), name: String, category: ClipCategory, clips: [Clip], bonusClipID: UUID? = nil) {
+        self.id          = id
+        self.name        = name
+        self.category    = category
+        self.clips       = clips
+        self.bonusClipID = bonusClipID
     }
 }
 
 // MARK: - Game Result
-struct GameResult {
+struct GameResult: Codable {
     let category: ClipCategory
     let correct: Bool
     let speedScore: Double

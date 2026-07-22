@@ -30,7 +30,7 @@ Otherwise open `music-iq-claude-2026.xcodeproj` in Xcode and run on a simulator.
 
 ## Architecture
 
-Everything lives in `music-iq-claude-2026/`, eight Swift files, no submodules.
+Everything lives in `music-iq-claude-2026/`, nine Swift files, no submodules.
 
 ### Content sources — two parallel `QuizSet` catalogs
 
@@ -87,6 +87,18 @@ This is the largest file and has two layers that are easy to conflate:
 When changing round/session behavior (pass threshold, retry logic, round size), the source of
 truth is `QuizProgression` + `QuizSessionViewModel.continueAfterOutcome()`, not `QuizViewModel`.
 
+### `QuizPersistence.swift` — resuming an in-progress session
+
+`QuizSessionViewModel` saves a `QuizSessionSnapshot` (`QuizPersistence.save`, backed by
+`UserDefaults`, JSON via `Codable`) every time a new round begins — the very first round, each
+subsequent round after a pass, and each reshuffled retry after a fail. Leaving mid-round
+(dismissing, backgrounding, the app getting killed) and coming back therefore resumes at the
+*start* of the round that was in progress, not the exact question — nothing about mid-question
+state (timer, audio playback, current selection) is restored, only round-level checkpoints are.
+The snapshot is cleared when a full session completes. `HomeView` checks `QuizPersistence.load()`
+on appear and, if present, launches `QuizSessionView(resuming:)` instead of building a fresh
+session from `QuizSet.activeSets`.
+
 ### `AudioManager.swift`
 
 Singleton (`AudioManager.shared`) that plays a clip by filename: checks the app bundle first,
@@ -96,10 +108,11 @@ been played once" (`hasPlayed`), used to enforce the Audio Lineup mystery clip's
 
 ### `Homeview.swift`
 
-Landing screen — streak/points/level header, a single "Start Quiz" entry point
-(`StartQuizCardView`) that launches `QuizSessionView` with `QuizSet.activeSets.flatMap { $0.clips
-}`, and a mock leaderboard. There is no per-category/per-set picker anymore; difficulty
-progression and category mixing are handled entirely by `QuizProgression`.
+Landing screen — streak/points/level header, a single entry point (`StartQuizCardView`, labeled
+"Continue Quiz" instead of "Start Quiz" when a snapshot exists) that launches `QuizSessionView`
+either fresh from `QuizSet.activeSets.flatMap { $0.clips }` or resumed from a saved snapshot, and
+a mock leaderboard. There is no per-category/per-set picker anymore; difficulty progression and
+category mixing are handled entirely by `QuizProgression`.
 
 ### `Extensions.swift`
 
