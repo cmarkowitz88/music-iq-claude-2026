@@ -4,3 +4,5 @@ music-iq-claude-2026/Audio
 *.xcuserstate
 xcuserdata/
 .DS_Store
+*.xls
+*.xlsx
