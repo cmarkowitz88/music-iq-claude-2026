@@ -1127,6 +1127,13 @@ extension QuizSet {
                  question: MultipleChoiceQuestion(
                     text: "This bass track is played in style of who?",
                     options: ["Lemmy", "Marcus Miller", "Jeff Berlin", "Stanley Clarke"], correctIndex: 0)),
+            Clip(name: "This rhythm has which type of a feel?", fileName: "SoThisIsLoveDrums.mp3",
+                 category: .other, setName: "Music Knowledge (Debug - Medium)", difficulty: .medium,
+                 trackLengthSeconds: 29, hint: "This drum groove uses uneven timing between beat subdivisions — playing a longer note followed by a shorter one instead of splitting them evenly, which gives the rhythm a long-short feel rather than a mechanical one.",
+                 sourceID: "mk-drums-brushes", sourceScore: 1,
+                 question: MultipleChoiceQuestion(
+                    text: "This rhythm has which type of a feel?",
+                    options: ["Free Time", "Backwards", "Swung", "Straight"], correctIndex: 2)),
         ])
 
     static let debugKnowledgeHardSet = QuizSet(
@@ -1609,7 +1616,7 @@ extension QuizSet {
                     options: ["Paradiddle", "Ghost Note", "Tap", "Ruff"], correctIndex: 1)),
             Clip(name: "What is the correct time signature for t", fileName: "Drum-9-8-V3.mp3",
                  category: .other, setName: "Music Knowledge (Debug - Hard)", difficulty: .hard,
-                 trackLengthSeconds: 12, hint: "In this uncommon time signature the 8th note receives one count.",
+                 trackLengthSeconds: 16, hint: "In this uncommon time signature the 8th note receives one count.",
                  sourceID: "mq-timesignag", sourceScore: 5,
                  question: MultipleChoiceQuestion(
                     text: "What is the correct time signature for this track?",
@@ -1628,6 +1635,13 @@ extension QuizSet {
                  question: MultipleChoiceQuestion(
                     text: "What is the correct time signature for this sound clip?",
                     options: ["12/8", "7/4", "6/8", "4/4"], correctIndex: 2)),
+            Clip(name: "What is the time signature of this clip?", fileName: "SevenDaysDrums.mp3",
+                 category: .other, setName: "Music Knowledge (Debug - Hard)", difficulty: .hard,
+                 trackLengthSeconds: 15, hint: "In this time signature there are 5 beats per measure, and a quarter note gets one beat.",
+                 sourceID: "mk-drums-brushes", sourceScore: 1,
+                 question: MultipleChoiceQuestion(
+                    text: "What is the time signature of this clip?",
+                    options: ["4/4", "5/4", "7/4", "3/4"], correctIndex: 1)),
         ])
 
     static let debugAudioLineupSet = QuizSet(

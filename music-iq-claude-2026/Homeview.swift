@@ -7,12 +7,19 @@ struct HomeView: View {
     @AppStorage("streakDays")  private var streakDays: Int  = 5
     @State private var navigateToQuiz = false
     @State private var resumableSnapshot: QuizSessionSnapshot? = nil
-    @State private var showResetConfirmation = false
-    #if DEBUG
-    @State private var showDebugFinder = false
-    #endif
+    @State private var musicalIQ: MusicalIQScore? = nil
 
     private var level: Int { max(1, totalPoints / 500 + 1) }
+
+    private func refreshMusicalIQ() {
+        musicalIQ = MusicalIQScore.calculate(results: MusicalIQStore.load())
+    }
+
+    private func bankRound(earned: Int, results: [GameResult]) {
+        totalPoints += earned
+        MusicalIQStore.append(results)
+        refreshMusicalIQ()
+    }
 
     var body: some View {
         NavigationStack {
@@ -46,6 +53,9 @@ struct HomeView: View {
                     .padding(.horizontal, 20)
                     .padding(.top, 16)
 
+                    MusicalIQCardView(score: musicalIQ)
+                        .padding(.horizontal, 20)
+
                     StreakCardView(streakDays: streakDays)
                         .padding(.horizontal, 20)
 
@@ -64,56 +74,29 @@ struct HomeView: View {
 
                     LeaderboardCardView(yourPoints: totalPoints)
                         .padding(.horizontal, 20)
-
-                    VStack(spacing: 8) {
-                        Button("Reset Progress") { showResetConfirmation = true }
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
-
-                        #if DEBUG
-                        Button("🔍 Debug: Find Question") { showDebugFinder = true }
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
-                        #endif
-                    }
-                    .padding(.bottom, 24)
+                        .padding(.bottom, 24)
                 }
             }
             .background(Color(.systemGroupedBackground))
             .navigationBarHidden(true)
-            .onAppear { resumableSnapshot = QuizPersistence.load() }
-            .alert("Reset Progress?", isPresented: $showResetConfirmation) {
-                Button("Reset", role: .destructive) { resetProgress() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("This clears your points, streak, and any quiz in progress. This can't be undone.")
+            .onAppear {
+                resumableSnapshot = QuizPersistence.load()
+                refreshMusicalIQ()
             }
-            #if DEBUG
-            .navigationDestination(isPresented: $showDebugFinder) {
-                DebugQuestionFinderView { showDebugFinder = false }
-            }
-            #endif
             .navigationDestination(isPresented: $navigateToQuiz) {
                 if let snapshot = resumableSnapshot {
                     QuizSessionView(resuming: snapshot) { _, _ in
-                    } onRoundBanked: { earned in
-                        totalPoints += earned
+                    } onRoundBanked: { earned, results in
+                        bankRound(earned: earned, results: results)
                     }
                 } else {
                     QuizSessionView(clips: QuizSet.activeSets.flatMap { $0.clips }) { _, _ in
-                    } onRoundBanked: { earned in
-                        totalPoints += earned
+                    } onRoundBanked: { earned, results in
+                        bankRound(earned: earned, results: results)
                     }
                 }
             }
         }
-    }
-
-    private func resetProgress() {
-        QuizPersistence.clear()
-        resumableSnapshot = nil
-        totalPoints = 0
-        streakDays  = 0
     }
 }
 

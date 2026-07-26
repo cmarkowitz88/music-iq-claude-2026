@@ -213,7 +213,7 @@ final class QuizViewModel: ObservableObject {
         streak       = 0
         results.append(false)
         sfxWrong()
-        gameResults.append(GameResult(category: currentClip.category,
+        gameResults.append(GameResult(category: currentClip.category, difficulty: currentClip.difficulty,
                                       correct: false, speedScore: 0, pointsEarned: 0))
     }
 
@@ -256,7 +256,7 @@ final class QuizViewModel: ObservableObject {
         }
 
         results.append(correct)
-        gameResults.append(GameResult(category: currentClip.category,
+        gameResults.append(GameResult(category: currentClip.category, difficulty: currentClip.difficulty,
                                       correct: correct, speedScore: speed,
                                       pointsEarned: earned))
     }
@@ -452,6 +452,10 @@ final class QuizSessionViewModel: ObservableObject {
     @Published var currentRound: QuizSet?
     @Published var pendingOutcome: RoundOutcome?
     @Published var isFinished = false
+    /// Computed the moment the session ends (manual exit or the pool running out) from whatever
+    /// rounds were actually passed — nil if nothing was passed yet, in which case there's
+    /// nothing meaningful to show.
+    @Published var recapScore: MusicalIQScore?
 
     private(set) var sessionScore = 0
     private(set) var sessionResults: [GameResult] = []
@@ -460,16 +464,17 @@ final class QuizSessionViewModel: ObservableObject {
 
     private let progression: QuizProgression
     let onComplete: (Int, [GameResult]) -> Void
-    /// Fires as soon as a round is passed, with just that round's earned points — this is what
-    /// actually banks points to the player's running total. A "full session" (every difficulty
-    /// tier's entire pool exhausted) is effectively unreachable in normal play, so `onComplete`
-    /// firing only at the very end isn't a usable point at which to credit anything.
-    let onRoundBanked: (Int) -> Void
+    /// Fires as soon as a round is passed, with that round's earned points and results — this is
+    /// what actually banks points (and Musical IQ data) to the player's running total. A "full
+    /// session" (every difficulty tier's entire pool exhausted) is effectively unreachable in
+    /// normal play, so `onComplete` firing only at the very end isn't a usable point at which to
+    /// credit anything.
+    let onRoundBanked: (Int, [GameResult]) -> Void
 
     var hasMoreRoundsAvailable: Bool { progression.hasMoreRounds }
 
     init(clips: [Clip], onComplete: @escaping (Int, [GameResult]) -> Void,
-         onRoundBanked: @escaping (Int) -> Void) {
+         onRoundBanked: @escaping (Int, [GameResult]) -> Void) {
         self.progression   = QuizProgression(clips: clips)
         self.onComplete    = onComplete
         self.onRoundBanked = onRoundBanked
@@ -480,7 +485,7 @@ final class QuizSessionViewModel: ObservableObject {
     /// Picks a session back up from a saved snapshot — restarting at the beginning of the
     /// round that was in progress, with the pool/score/streak state as of when that round began.
     init(resuming snapshot: QuizSessionSnapshot, onComplete: @escaping (Int, [GameResult]) -> Void,
-         onRoundBanked: @escaping (Int) -> Void) {
+         onRoundBanked: @escaping (Int, [GameResult]) -> Void) {
         self.progression     = QuizProgression(snapshot: snapshot.progression)
         self.onComplete      = onComplete
         self.onRoundBanked   = onRoundBanked
@@ -524,12 +529,13 @@ final class QuizSessionViewModel: ObservableObject {
             sessionScore   += outcome.score
             sessionResults += outcome.results
             carryStreak      = outcome.streak
-            onRoundBanked(outcome.score)
+            onRoundBanked(outcome.score, outcome.results)
             if let next = progression.nextRound() {
                 currentRound = next
                 saveSnapshot()
             } else {
                 onComplete(sessionScore, sessionResults)
+                recapScore = MusicalIQScore.calculate(results: sessionResults)
                 isFinished = true
                 QuizPersistence.clear()
             }
@@ -544,32 +550,44 @@ final class QuizSessionViewModel: ObservableObject {
             saveSnapshot()
         }
     }
+
+    /// Ends the session early (the player tapped the X mid-round) — scores whatever rounds were
+    /// already passed rather than discarding them.
+    func requestExit() {
+        guard !isFinished else { return }
+        recapScore = MusicalIQScore.calculate(results: sessionResults)
+        isFinished = true
+    }
 }
 
 // MARK: - Quiz Session View
 struct QuizSessionView: View {
     @StateObject private var vm: QuizSessionViewModel
+    @Environment(\.dismiss) private var dismiss
 
     init(clips: [Clip], onComplete: @escaping (Int, [GameResult]) -> Void,
-         onRoundBanked: @escaping (Int) -> Void) {
+         onRoundBanked: @escaping (Int, [GameResult]) -> Void) {
         _vm = StateObject(wrappedValue: QuizSessionViewModel(clips: clips, onComplete: onComplete,
                                                               onRoundBanked: onRoundBanked))
     }
 
     init(resuming snapshot: QuizSessionSnapshot, onComplete: @escaping (Int, [GameResult]) -> Void,
-         onRoundBanked: @escaping (Int) -> Void) {
+         onRoundBanked: @escaping (Int, [GameResult]) -> Void) {
         _vm = StateObject(wrappedValue: QuizSessionViewModel(resuming: snapshot, onComplete: onComplete,
                                                               onRoundBanked: onRoundBanked))
     }
 
     var body: some View {
         Group {
-            if let outcome = vm.pendingOutcome {
+            if vm.isFinished {
+                MusicalIQRecapView(score: vm.recapScore) { dismiss() }
+            } else if let outcome = vm.pendingOutcome {
                 RoundOutcomeView(outcome: outcome, hasMoreRounds: vm.hasMoreRoundsAvailable) {
                     vm.continueAfterOutcome()
                 }
             } else if let round = vm.currentRound {
-                QuizView(quizSet: round, initialStreak: vm.carryStreak, initialBestStreak: vm.carryBestStreak) { score, results, streak, bestStreak in
+                QuizView(quizSet: round, initialStreak: vm.carryStreak, initialBestStreak: vm.carryBestStreak,
+                         onExit: { vm.requestExit() }) { score, results, streak, bestStreak in
                     vm.handleRoundComplete(score: score, results: results, streak: streak, bestStreak: bestStreak)
                 }
                 .id(round.id)
@@ -581,10 +599,6 @@ struct QuizSessionView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(.systemGroupedBackground))
             }
-        }
-        .navigationDestination(isPresented: $vm.isFinished) {
-            Text("MusicIQ Results — coming next!")
-                .navigationBarHidden(false)
         }
     }
 }
@@ -639,16 +653,22 @@ struct RoundOutcomeView: View {
 struct QuizView: View {
     @StateObject private var vm: QuizViewModel
     @Environment(\.dismiss) private var dismiss
+    /// Overrides what the top bar's X button does — used by QuizSessionView to intercept an
+    /// exit mid-session and show a Musical IQ recap instead of just popping away. Defaults to
+    /// the plain environment dismiss for standalone uses (e.g. the debug question preview).
+    var onExit: (() -> Void)?
 
     init(quizSet: QuizSet, initialStreak: Int = 0, initialBestStreak: Int = 0,
+         onExit: (() -> Void)? = nil,
          onComplete: @escaping (Int, [GameResult], Int, Int) -> Void) {
         _vm = StateObject(wrappedValue: QuizViewModel(quizSet: quizSet, initialStreak: initialStreak,
                                                        initialBestStreak: initialBestStreak, onComplete: onComplete))
+        self.onExit = onExit
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            QuizTopBar(vm: vm, dismiss: dismiss)
+            QuizTopBar(vm: vm, onDismiss: onExit ?? { dismiss() })
             QuizProgressBar(vm: vm)
             ScrollView {
                 VStack(spacing: 14) {
@@ -682,11 +702,15 @@ struct QuizView: View {
 // MARK: - Top Bar
 struct QuizTopBar: View {
     @ObservedObject var vm: QuizViewModel
-    let dismiss: DismissAction
+    let onDismiss: () -> Void
     @State private var showSFXTooltip = false
     var body: some View {
         HStack {
-            Button { dismiss() } label: {
+            Button {
+                AudioManager.shared.stopAll()
+                vm.playingChoiceId = nil
+                onDismiss()
+            } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 14)).foregroundColor(.secondary)
                     .padding(8).background(Color(.systemFill)).clipShape(Circle())

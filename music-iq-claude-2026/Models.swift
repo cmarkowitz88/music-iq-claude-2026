@@ -281,48 +281,57 @@ struct QuizSet: Identifiable {
 // MARK: - Game Result
 struct GameResult: Codable {
     let category: ClipCategory
+    let difficulty: Difficulty
     let correct: Bool
     let speedScore: Double
     let pointsEarned: Int
 }
 
 // MARK: - Musical IQ Score
+/// Scored by `Difficulty` rather than `ClipCategory` — the debug content pool tags nearly
+/// everything `.other`, so a category breakdown wouldn't be meaningful today; difficulty tier
+/// is the axis that actually varies across real content.
 struct MusicalIQScore {
     let overallIQ: Int
-    let categoryScores: [ClipCategory: Int]
+    let difficultyScores: [Difficulty: Int]
     let tierLabel: String
     let tierDescription: String
-    let strongestCategory: ClipCategory?
-    let weakestCategory: ClipCategory?
+    let strongestDifficulty: Difficulty?
+    let weakestDifficulty: Difficulty?
+    let questionsAnswered: Int
 
-    static func calculate(results: [GameResult]) -> MusicalIQScore {
-        let categories = Array(Set(results.map { $0.category }))
-        var catScores: [ClipCategory: Int] = [:]
+    /// Nil (rather than a misleadingly confident default score) when there's nothing to score yet.
+    static func calculate(results: [GameResult]) -> MusicalIQScore? {
+        guard !results.isEmpty else { return nil }
 
-        for category in categories {
-            let catResults  = results.filter { $0.category == category }
-            guard !catResults.isEmpty else { continue }
-            let accuracy    = Double(catResults.filter { $0.correct }.count) / Double(catResults.count)
-            let avgSpeed    = catResults.map { $0.speedScore }.reduce(0, +) / Double(catResults.count)
-            let streakBonus = min(Double(catResults.filter { $0.correct }.count) * 0.05, 0.15)
-            catScores[category] = Int((accuracy * 0.60 + avgSpeed * 0.25 + streakBonus) * 100)
+        let difficulties = Array(Set(results.map { $0.difficulty }))
+        var diffScores: [Difficulty: Int] = [:]
+
+        for difficulty in difficulties {
+            let diffResults = results.filter { $0.difficulty == difficulty }
+            guard !diffResults.isEmpty else { continue }
+            let accuracy    = Double(diffResults.filter { $0.correct }.count) / Double(diffResults.count)
+            let avgSpeed    = diffResults.map { $0.speedScore }.reduce(0, +) / Double(diffResults.count)
+            let streakBonus = min(Double(diffResults.filter { $0.correct }.count) * 0.05, 0.15)
+            diffScores[difficulty] = Int((accuracy * 0.60 + avgSpeed * 0.25 + streakBonus) * 100)
         }
 
-        let avg = catScores.isEmpty ? 50.0 :
-            Double(catScores.values.reduce(0, +)) / Double(catScores.count)
+        let avg = diffScores.isEmpty ? 50.0 :
+            Double(diffScores.values.reduce(0, +)) / Double(diffScores.count)
         let iq  = min(160, max(80, Int(80 + (avg / 100.0) * 80)))
 
-        let strongest = catScores.max(by: { $0.value < $1.value })?.key
-        let weakest   = catScores.min(by: { $0.value < $1.value })?.key
+        let strongest = diffScores.max(by: { $0.value < $1.value })?.key
+        let weakest   = diffScores.min(by: { $0.value < $1.value })?.key
         let (label, desc) = tierInfo(for: iq)
 
         return MusicalIQScore(
             overallIQ: iq,
-            categoryScores: catScores,
+            difficultyScores: diffScores,
             tierLabel: label,
             tierDescription: desc,
-            strongestCategory: strongest,
-            weakestCategory: weakest
+            strongestDifficulty: strongest,
+            weakestDifficulty: weakest,
+            questionsAnswered: results.count
         )
     }
 

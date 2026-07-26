@@ -40,3 +40,28 @@ enum QuizPersistence {
         UserDefaults.standard.removeObject(forKey: key)
     }
 }
+
+/// Every passed round's results, accumulated across all sessions ever played, so the Home
+/// screen can show a live, all-time Musical IQ rather than one that only appears at the end of
+/// a session (which — like points before — would be unreachable in practice given how long a
+/// full session actually is).
+enum MusicalIQStore {
+    private static let key = "allTimeGameResults"
+
+    static func load() -> [GameResult] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let results = try? JSONDecoder().decode([GameResult].self, from: data) else { return [] }
+        return results
+    }
+
+    static func append(_ results: [GameResult]) {
+        var all = load()
+        all.append(contentsOf: results)
+        guard let data = try? JSONEncoder().encode(all) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+}
