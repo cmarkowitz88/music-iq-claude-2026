@@ -8,6 +8,7 @@ struct HomeView: View {
     @State private var navigateToQuiz = false
     @State private var resumableSnapshot: QuizSessionSnapshot? = nil
     @State private var musicalIQ: MusicalIQScore? = nil
+    @State private var showIQDetail = false
 
     private var level: Int { max(1, totalPoints / 500 + 1) }
 
@@ -55,6 +56,7 @@ struct HomeView: View {
 
                     MusicalIQCardView(score: musicalIQ)
                         .padding(.horizontal, 20)
+                        .onTapGesture { showIQDetail = true }
 
                     StreakCardView(streakDays: streakDays)
                         .padding(.horizontal, 20)
@@ -82,6 +84,9 @@ struct HomeView: View {
             .onAppear {
                 resumableSnapshot = QuizPersistence.load()
                 refreshMusicalIQ()
+            }
+            .sheet(isPresented: $showIQDetail) {
+                MusicalIQRecapView(score: musicalIQ) { showIQDetail = false }
             }
             .navigationDestination(isPresented: $navigateToQuiz) {
                 if let snapshot = resumableSnapshot {

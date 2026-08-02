@@ -142,6 +142,8 @@ struct MusicalIQCardView: View {
                 }
             }
             Spacer()
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13)).foregroundColor(.secondary)
         }
         .padding(16)
         .background(Color(.systemBackground))
