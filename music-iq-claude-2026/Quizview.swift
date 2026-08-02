@@ -65,21 +65,53 @@ final class QuizViewModel: ObservableObject {
     @Published var mysteryPlayed: Bool    = false
     @Published var showLineup: Bool       = false
     @Published var playingChoiceId: UUID? = nil
+    @Published var hintUsed: Bool             = false
+    @Published var eliminatedOptionIndex: Int? = nil
+    @Published var eliminatedChoiceId: UUID?   = nil
+    /// Display-order permutations, re-shuffled every time a question is shown (including on a
+    /// failed-round retry) so the correct answer's on-screen position can't be memorized —
+    /// each holds original-array indices in the order they should render.
+    @Published var optionOrder: [Int] = []
+    @Published var choiceOrder: [Int] = []
 
     let quizSet: QuizSet
-    var onComplete: (Int, [GameResult]) -> Void
+    var onComplete: (Int, [GameResult], Int, Int) -> Void
     var questionStartTime: Date = Date()
 
     private var timerTask: Task<Void, Never>?
     private var gameResults: [GameResult] = []
+    private var timerStarted = false
 
-    init(quizSet: QuizSet, onComplete: @escaping (Int, [GameResult]) -> Void) {
+    init(quizSet: QuizSet, initialStreak: Int = 0, initialBestStreak: Int = 0,
+         onComplete: @escaping (Int, [GameResult], Int, Int) -> Void) {
         self.quizSet    = quizSet
+        self.streak     = initialStreak
+        self.bestStreak = initialBestStreak
         self.onComplete = onComplete
+        shuffleAnswerOrder()
+    }
+
+    private func shuffleAnswerOrder() {
+        switch currentClip.questionType {
+        case .multipleChoice:
+            optionOrder = Array(currentClip.multipleChoiceQuestion?.options.indices ?? 0..<0).shuffled()
+            choiceOrder = []
+        case .audioLineup:
+            choiceOrder = Array(currentClip.audioLineupQuestion?.choices.indices ?? 0..<0).shuffled()
+            optionOrder = []
+        }
     }
 
     var currentClip: Clip { quizSet.clips[currentIndex] }
     var totalClips: Int   { quizSet.clips.count }
+
+    /// True for the one clip per round randomly picked to pay out `Difficulty.bonusQuestionPoints`.
+    var isBonusQuestion: Bool { quizSet.bonusClipID == currentClip.id }
+    /// The point value this specific question is worth before the streak/combo multiplier —
+    /// the bonus payout if this is the round's bonus question, otherwise the clip's normal value.
+    var currentQuestionPoints: Int {
+        isBonusQuestion ? currentClip.difficulty.bonusQuestionPoints : currentClip.points
+    }
 
     var comboMessage: String? {
         streak >= 3 ? "🔥 \(streak)x combo!" : streak >= 2 ? "⚡ \(streak)x combo!" : nil
@@ -88,17 +120,52 @@ final class QuizViewModel: ObservableObject {
         streak >= 3 ? 2.0 : streak >= 2 ? 1.5 : 1.0
     }
 
+    var hintAvailable: Bool {
+        !hintUsed && !answered && !(currentClip.hint?.isEmpty ?? true)
+    }
+
+    /// Eliminates one wrong option (or wrong lineup choice) at random and reveals the clip's
+    /// hint text. Only usable once per question, before it's answered.
+    func useHint() {
+        guard hintAvailable else { return }
+        hintUsed = true
+
+        switch currentClip.questionType {
+        case .multipleChoice:
+            guard let q = currentClip.multipleChoiceQuestion else { return }
+            let wrongIndices = q.options.indices.filter { $0 != q.correctIndex }
+            eliminatedOptionIndex = wrongIndices.randomElement()
+            if selectedOption == eliminatedOptionIndex { selectedOption = nil }
+        case .audioLineup:
+            guard let lu = currentClip.audioLineupQuestion else { return }
+            guard let toRemove = lu.choices.filter({ !$0.isCorrect }).randomElement() else { return }
+            eliminatedChoiceId = toRemove.id
+            if playingChoiceId == toRemove.id {
+                AudioManager.shared.stopAll()
+                playingChoiceId = nil
+            }
+            if let idx = lu.choices.firstIndex(where: { $0.id == toRemove.id }), selectedOption == idx {
+                selectedOption = nil
+            }
+        }
+    }
+
     func startTimer() {
+        runCountdown(from: currentClip.timerSeconds)
+    }
+
+    private func runCountdown(from remainingSeconds: Int) {
         timerTask?.cancel()
-        let seconds   = currentClip.difficulty.timerSeconds
-        timerValue    = seconds
-        timerProgress = 1.0
+        timerStarted  = true
+        let total     = currentClip.timerSeconds
+        timerValue    = remainingSeconds
+        timerProgress = Double(remainingSeconds) / Double(total)
         timerTask = Task { [weak self] in
-            for remaining in stride(from: seconds, through: 0, by: -1) {
+            for remaining in stride(from: remainingSeconds, through: 0, by: -1) {
                 guard !Task.isCancelled, let self else { return }
                 await MainActor.run {
                     self.timerValue    = remaining
-                    self.timerProgress = Double(remaining) / Double(seconds)
+                    self.timerProgress = Double(remaining) / Double(total)
                     if remaining <= 5 { self.sfxTick() }
                     if remaining == 0 { self.timeUp() }
                 }
@@ -110,15 +177,43 @@ final class QuizViewModel: ObservableObject {
 
     func stopTimer() { timerTask?.cancel(); timerTask = nil }
 
+    /// Pauses the countdown in place (e.g. while the user has paused the clip) — `timerValue`
+    /// is left untouched so `resumeTimer()` can continue from exactly where it left off.
+    func pauseTimer() { stopTimer() }
+
+    /// Continues a paused countdown from its current value. No-op if it's already running,
+    /// hasn't started yet, or the question's already been answered.
+    func resumeTimer() {
+        guard timerTask == nil, timerStarted, !answered else { return }
+        runCountdown(from: timerValue)
+    }
+
+    /// Shows the full countdown duration for the upcoming question without starting it —
+    /// the clock only actually starts once the user taps play.
+    func resetTimerDisplay() {
+        timerValue    = currentClip.timerSeconds
+        timerProgress = 1.0
+    }
+
+    /// Starts the countdown the first time the user plays the clip; later replays don't
+    /// restart it.
+    func startTimerIfNeeded() {
+        guard !timerStarted else { return }
+        questionStartTime = Date()
+        startTimer()
+    }
+
     func timeUp() {
         guard !answered else { return }
+        AudioManager.shared.stopAll()
+        playingChoiceId = nil
         answered     = true
         isCorrect    = false
         showFeedback = true
         streak       = 0
         results.append(false)
         sfxWrong()
-        gameResults.append(GameResult(category: currentClip.category,
+        gameResults.append(GameResult(category: currentClip.category, difficulty: currentClip.difficulty,
                                       correct: false, speedScore: 0, pointsEarned: 0))
     }
 
@@ -130,6 +225,8 @@ final class QuizViewModel: ObservableObject {
     func submitAnswer() {
         guard !answered, let sel = selectedOption else { return }
         stopTimer()
+        AudioManager.shared.stopAll()
+        playingChoiceId = nil
         answered = true
 
         let correct: Bool
@@ -144,13 +241,13 @@ final class QuizViewModel: ObservableObject {
         showFeedback = true
 
         let elapsed = Date().timeIntervalSince(questionStartTime)
-        let speed   = max(0, min(1.0, 1.0 - elapsed / Double(currentClip.difficulty.timerSeconds)))
+        let speed   = max(0, min(1.0, 1.0 - elapsed / Double(currentClip.timerSeconds)))
         var earned  = 0
 
         if correct {
             streak += 1
             if streak > bestStreak { bestStreak = streak }
-            earned  = Int(Double(currentClip.points) * bonusMultiplier)
+            earned  = Int(Double(currentQuestionPoints) * bonusMultiplier)
             score  += earned
             streak >= 3 ? sfxCombo() : sfxCorrect()
         } else {
@@ -159,7 +256,7 @@ final class QuizViewModel: ObservableObject {
         }
 
         results.append(correct)
-        gameResults.append(GameResult(category: currentClip.category,
+        gameResults.append(GameResult(category: currentClip.category, difficulty: currentClip.difficulty,
                                       correct: correct, speedScore: speed,
                                       pointsEarned: earned))
     }
@@ -169,7 +266,7 @@ final class QuizViewModel: ObservableObject {
         playingChoiceId = nil
         if currentIndex + 1 >= totalClips {
             isFinished = true
-            onComplete(score, gameResults)
+            onComplete(score, gameResults, streak, bestStreak)
         } else {
             currentIndex   += 1
             selectedOption  = nil
@@ -178,38 +275,61 @@ final class QuizViewModel: ObservableObject {
             showFeedback    = false
             mysteryPlayed   = false
             showLineup      = false
+            timerStarted    = false
+            hintUsed              = false
+            eliminatedOptionIndex = nil
+            eliminatedChoiceId    = nil
             questionStartTime = Date()
-            if currentClip.questionType == .multipleChoice { startTimer() }
+            resetTimerDisplay()
+            shuffleAnswerOrder()
         }
     }
+
+    /// Falls back to this when a clip has no real `trackLengthSeconds` (e.g. hand-written
+    /// sample data that predates the imported duration field).
+    private static let fallbackPlaybackSeconds = 3.0
 
     func playMystery() {
         guard !mysteryPlayed else { return }
         mysteryPlayed = true
+        // AudioManager's own no-replay guard is keyed off a single global flag that's never
+        // otherwise reset — clear it here so an earlier clip played anywhere else in the app
+        // doesn't block this one. `mysteryPlayed` above is what actually enforces "once per
+        // question."
+        AudioManager.shared.resetMysteryState()
         AudioManager.shared.play(fileName: currentClip.fileName, allowReplay: false)
+        let seconds = currentClip.trackLengthSeconds > 0
+            ? Double(currentClip.trackLengthSeconds) : Self.fallbackPlaybackSeconds
         Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             await MainActor.run {
+                AudioManager.shared.stopAll()
                 self?.showLineup = true
-                self?.startTimer()
             }
         }
     }
 
+    /// Choices can be freely replayed, paused/resumed, and switched between at any time before
+    /// the question's answered — there's no "used it up" lockout here, unlike the multiple
+    /// choice play button.
     func toggleChoice(_ choice: AudioChoice) {
-        if playingChoiceId == choice.id {
-            AudioManager.shared.stopAll()
-            playingChoiceId = nil
+        let audio = AudioManager.shared
+        let isCurrent = playingChoiceId == choice.id
+
+        if isCurrent && audio.isPlaying {
+            audio.pause()
+            pauseTimer()
+        } else if isCurrent && !audio.didFinishPlaying {
+            audio.resume()
+            resumeTimer()
         } else {
-            AudioManager.shared.stopAll()
             playingChoiceId = choice.id
-            AudioManager.shared.play(fileName: choice.fileName)
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-                await MainActor.run {
-                    if self?.playingChoiceId == choice.id { self?.playingChoiceId = nil }
-                }
-            }
+            audio.play(fileName: choice.fileName)
+            // The answer countdown only starts once the user actually plays a candidate —
+            // startTimerIfNeeded() begins it the first time; resumeTimer() covers switching to
+            // a fresh choice after having paused, so the countdown doesn't stay frozen forever.
+            startTimerIfNeeded()
+            resumeTimer()
         }
     }
 
@@ -250,18 +370,305 @@ final class QuizViewModel: ObservableObject {
     }
 }
 
+// MARK: - Round Outcome
+struct RoundOutcome: Identifiable {
+    let id = UUID()
+    let round: QuizSet
+    let score: Int
+    let results: [GameResult]
+    let correctCount: Int
+    let requiredCount: Int
+    let passed: Bool
+    let streak: Int
+    let bestStreak: Int
+    var totalCount: Int { round.clips.count }
+}
+
+// MARK: - Quiz Progression
+/// Hands out successive rounds of `roundSize` clips, one difficulty tier at a time
+/// (easy → medium → hard). A tier keeps producing fresh rounds for as long as it has
+/// enough unused clips left to fill one; once it can't, the next tier takes over. The
+/// session runs out of rounds once every tier is short on remaining content.
+final class QuizProgression {
+    static let roundSize = 12
+    static let passRatio = 0.75
+
+    static func requiredCorrect(for roundSize: Int) -> Int {
+        Int((Double(roundSize) * passRatio).rounded(.up))
+    }
+
+    private let difficulties: [Difficulty] = Difficulty.allCases.sorted { $0.rawValue < $1.rawValue }
+    private var remaining: [Difficulty: [Clip]]
+    private var roundCounts: [Difficulty: Int] = [:]
+    private var difficultyIndex = 0
+
+    init(clips: [Clip]) {
+        remaining = Dictionary(grouping: clips, by: \.difficulty)
+    }
+
+    init(snapshot: QuizProgressionSnapshot) {
+        remaining       = snapshot.remainingByDifficulty
+        difficultyIndex = snapshot.difficultyIndex
+        roundCounts     = snapshot.roundCounts
+    }
+
+    var snapshot: QuizProgressionSnapshot {
+        QuizProgressionSnapshot(remainingByDifficulty: remaining, difficultyIndex: difficultyIndex,
+                                 roundCounts: roundCounts)
+    }
+
+    /// True if calling `nextRound()` right now would return a round rather than nil.
+    var hasMoreRounds: Bool {
+        guard difficultyIndex < difficulties.count else { return false }
+        return difficulties[difficultyIndex...].contains {
+            (remaining[$0]?.count ?? 0) >= Self.roundSize
+        }
+    }
+
+    func nextRound() -> QuizSet? {
+        while difficultyIndex < difficulties.count {
+            let difficulty = difficulties[difficultyIndex]
+            var pool = remaining[difficulty] ?? []
+            guard pool.count >= Self.roundSize else {
+                difficultyIndex += 1
+                continue
+            }
+            pool.shuffle()
+            remaining[difficulty] = Array(pool.dropFirst(Self.roundSize))
+            roundCounts[difficulty, default: 0] += 1
+
+            let name = "\(difficulty.label) Round \(roundCounts[difficulty]!)"
+            let roundClips = Array(pool.prefix(Self.roundSize))
+            return QuizSet(name: name, category: .other, clips: roundClips,
+                            bonusClipID: roundClips.randomElement()?.id)
+        }
+        return nil
+    }
+}
+
+// MARK: - Quiz Session View Model
+@MainActor
+final class QuizSessionViewModel: ObservableObject {
+    @Published var currentRound: QuizSet?
+    @Published var pendingOutcome: RoundOutcome?
+    @Published var isFinished = false
+    /// Computed the moment the session ends (manual exit or the pool running out) from whatever
+    /// rounds were actually passed — nil if nothing was passed yet, in which case there's
+    /// nothing meaningful to show.
+    @Published var recapScore: MusicalIQScore?
+
+    private(set) var sessionScore = 0
+    private(set) var sessionResults: [GameResult] = []
+    private(set) var carryStreak = 0
+    private(set) var carryBestStreak = 0
+
+    private let progression: QuizProgression
+    let onComplete: (Int, [GameResult]) -> Void
+    /// Fires as soon as a round is passed, with that round's earned points and results — this is
+    /// what actually banks points (and Musical IQ data) to the player's running total. A "full
+    /// session" (every difficulty tier's entire pool exhausted) is effectively unreachable in
+    /// normal play, so `onComplete` firing only at the very end isn't a usable point at which to
+    /// credit anything.
+    let onRoundBanked: (Int, [GameResult]) -> Void
+
+    var hasMoreRoundsAvailable: Bool { progression.hasMoreRounds }
+
+    init(clips: [Clip], onComplete: @escaping (Int, [GameResult]) -> Void,
+         onRoundBanked: @escaping (Int, [GameResult]) -> Void) {
+        self.progression   = QuizProgression(clips: clips)
+        self.onComplete    = onComplete
+        self.onRoundBanked = onRoundBanked
+        self.currentRound = progression.nextRound()
+        saveSnapshot()
+    }
+
+    /// Picks a session back up from a saved snapshot — restarting at the beginning of the
+    /// round that was in progress, with the pool/score/streak state as of when that round began.
+    init(resuming snapshot: QuizSessionSnapshot, onComplete: @escaping (Int, [GameResult]) -> Void,
+         onRoundBanked: @escaping (Int, [GameResult]) -> Void) {
+        self.progression     = QuizProgression(snapshot: snapshot.progression)
+        self.onComplete      = onComplete
+        self.onRoundBanked   = onRoundBanked
+        self.sessionScore     = snapshot.sessionScore
+        self.sessionResults   = snapshot.sessionResults
+        self.carryStreak      = snapshot.carryStreak
+        self.carryBestStreak  = snapshot.carryBestStreak
+        let resumedClips = snapshot.currentRoundClips.shuffled()
+        self.currentRound = QuizSet(name: snapshot.currentRoundName, category: .other,
+                                     clips: resumedClips, bonusClipID: resumedClips.randomElement()?.id)
+    }
+
+    private func saveSnapshot() {
+        guard let round = currentRound else { return }
+        QuizPersistence.save(QuizSessionSnapshot(
+            currentRoundClips: round.clips,
+            currentRoundName: round.name,
+            progression: progression.snapshot,
+            sessionScore: sessionScore,
+            sessionResults: sessionResults,
+            carryStreak: carryStreak,
+            carryBestStreak: carryBestStreak
+        ))
+    }
+
+    func handleRoundComplete(score: Int, results: [GameResult], streak: Int, bestStreak: Int) {
+        guard let round = currentRound else { return }
+        let correct  = results.filter { $0.correct }.count
+        let required = QuizProgression.requiredCorrect(for: round.clips.count)
+        pendingOutcome = RoundOutcome(round: round, score: score, results: results,
+                                       correctCount: correct, requiredCount: required,
+                                       passed: correct >= required, streak: streak, bestStreak: bestStreak)
+    }
+
+    func continueAfterOutcome() {
+        guard let outcome = pendingOutcome else { return }
+        pendingOutcome = nil
+        carryBestStreak = max(carryBestStreak, outcome.bestStreak)
+
+        if outcome.passed {
+            sessionScore   += outcome.score
+            sessionResults += outcome.results
+            carryStreak      = outcome.streak
+            onRoundBanked(outcome.score, outcome.results)
+            if let next = progression.nextRound() {
+                currentRound = next
+                saveSnapshot()
+            } else {
+                onComplete(sessionScore, sessionResults)
+                recapScore = MusicalIQScore.calculate(results: sessionResults)
+                isFinished = true
+                QuizPersistence.clear()
+            }
+        } else {
+            // Redo the same clips in a new order, with a freshly re-rolled bonus question — the
+            // streak that led to this failed attempt doesn't carry into the reset the retry
+            // represents.
+            carryStreak  = 0
+            let retryClips = outcome.round.clips.shuffled()
+            currentRound = QuizSet(name: outcome.round.name, category: outcome.round.category,
+                                    clips: retryClips, bonusClipID: retryClips.randomElement()?.id)
+            saveSnapshot()
+        }
+    }
+
+    /// Ends the session early (the player tapped the X mid-round) — scores whatever rounds were
+    /// already passed rather than discarding them.
+    func requestExit() {
+        guard !isFinished else { return }
+        recapScore = MusicalIQScore.calculate(results: sessionResults)
+        isFinished = true
+    }
+}
+
+// MARK: - Quiz Session View
+struct QuizSessionView: View {
+    @StateObject private var vm: QuizSessionViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    init(clips: [Clip], onComplete: @escaping (Int, [GameResult]) -> Void,
+         onRoundBanked: @escaping (Int, [GameResult]) -> Void) {
+        _vm = StateObject(wrappedValue: QuizSessionViewModel(clips: clips, onComplete: onComplete,
+                                                              onRoundBanked: onRoundBanked))
+    }
+
+    init(resuming snapshot: QuizSessionSnapshot, onComplete: @escaping (Int, [GameResult]) -> Void,
+         onRoundBanked: @escaping (Int, [GameResult]) -> Void) {
+        _vm = StateObject(wrappedValue: QuizSessionViewModel(resuming: snapshot, onComplete: onComplete,
+                                                              onRoundBanked: onRoundBanked))
+    }
+
+    var body: some View {
+        Group {
+            if vm.isFinished {
+                MusicalIQRecapView(score: vm.recapScore) { dismiss() }
+            } else if let outcome = vm.pendingOutcome {
+                RoundOutcomeView(outcome: outcome, hasMoreRounds: vm.hasMoreRoundsAvailable) {
+                    vm.continueAfterOutcome()
+                }
+            } else if let round = vm.currentRound {
+                QuizView(quizSet: round, initialStreak: vm.carryStreak, initialBestStreak: vm.carryBestStreak,
+                         onExit: { vm.requestExit() }) { score, results, streak, bestStreak in
+                    vm.handleRoundComplete(score: score, results: results, streak: streak, bestStreak: bestStreak)
+                }
+                .id(round.id)
+            } else {
+                VStack(spacing: 16) {
+                    Text("No quiz content available.")
+                        .font(.system(size: 15)).foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(.systemGroupedBackground))
+            }
+        }
+    }
+}
+
+// MARK: - Round Outcome View
+struct RoundOutcomeView: View {
+    let outcome: RoundOutcome
+    let hasMoreRounds: Bool
+    let onContinue: () -> Void
+
+    private var continueLabel: String {
+        guard outcome.passed else { return "Try again" }
+        return hasMoreRounds ? "Next round →" : "See my MusicIQ →"
+    }
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer()
+            ZStack {
+                Circle()
+                    .fill(outcome.passed ? Color(hex: "#E1F5EE") : Color(hex: "#FAECE7"))
+                    .frame(width: 88, height: 88)
+                Image(systemName: outcome.passed ? "checkmark" : "arrow.counterclockwise")
+                    .font(.system(size: 34, weight: .medium))
+                    .foregroundColor(outcome.passed ? Color(hex: "#0F6E56") : Color(hex: "#993C1D"))
+            }
+            VStack(spacing: 6) {
+                Text(outcome.passed ? "Round passed!" : "Round failed")
+                    .font(.system(size: 20, weight: .medium))
+                Text("\(outcome.correctCount) of \(outcome.totalCount) correct — you need \(outcome.requiredCount) to pass.")
+                    .font(.system(size: 14)).foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                if !outcome.passed {
+                    Text("Let's give this round another shot.")
+                        .font(.system(size: 13)).foregroundColor(.secondary)
+                }
+            }
+            Spacer()
+            Button(action: onContinue) {
+                Text(continueLabel)
+                    .font(.system(size: 15, weight: .medium)).foregroundColor(.white)
+                    .frame(maxWidth: .infinity).padding(.vertical, 13)
+                    .background(Color(hex: "#534AB7")).cornerRadius(12)
+            }
+        }
+        .padding(24)
+        .background(Color(.systemGroupedBackground))
+    }
+}
+
 // MARK: - Quiz View
 struct QuizView: View {
     @StateObject private var vm: QuizViewModel
     @Environment(\.dismiss) private var dismiss
+    /// Overrides what the top bar's X button does — used by QuizSessionView to intercept an
+    /// exit mid-session and show a Musical IQ recap instead of just popping away. Defaults to
+    /// the plain environment dismiss for standalone uses (e.g. the debug question preview).
+    var onExit: (() -> Void)?
 
-    init(quizSet: QuizSet, onComplete: @escaping (Int, [GameResult]) -> Void) {
-        _vm = StateObject(wrappedValue: QuizViewModel(quizSet: quizSet, onComplete: onComplete))
+    init(quizSet: QuizSet, initialStreak: Int = 0, initialBestStreak: Int = 0,
+         onExit: (() -> Void)? = nil,
+         onComplete: @escaping (Int, [GameResult], Int, Int) -> Void) {
+        _vm = StateObject(wrappedValue: QuizViewModel(quizSet: quizSet, initialStreak: initialStreak,
+                                                       initialBestStreak: initialBestStreak, onComplete: onComplete))
+        self.onExit = onExit
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            QuizTopBar(vm: vm, dismiss: dismiss)
+            QuizTopBar(vm: vm, onDismiss: onExit ?? { dismiss() })
             QuizProgressBar(vm: vm)
             ScrollView {
                 VStack(spacing: 14) {
@@ -270,19 +677,24 @@ struct QuizView: View {
                     case .audioLineup:    LineupQuestionView(vm: vm)
                     }
                 }
+                .id(vm.currentClip.id)
                 .padding(16)
             }
             QuizActionBar(vm: vm)
         }
-        .background(Color(.systemGroupedBackground))
+        .background(
+            ZStack {
+                Color(.systemGroupedBackground)
+                // A subtle per-difficulty wash — reuses the same accent colors as
+                // DifficultyBadge/the progress dots, just at low opacity over the system
+                // background so it still adapts correctly in dark mode.
+                Color(hex: vm.currentClip.difficulty.accentHex).opacity(0.07)
+            }
+        )
         .navigationBarHidden(true)
         .onAppear {
             vm.questionStartTime = Date()
-            if vm.currentClip.questionType == .multipleChoice { vm.startTimer() }
-        }
-        .navigationDestination(isPresented: $vm.isFinished) {
-            Text("MusicIQ Results — coming next!")
-                .navigationBarHidden(false)
+            vm.resetTimerDisplay()
         }
     }
 }
@@ -290,10 +702,15 @@ struct QuizView: View {
 // MARK: - Top Bar
 struct QuizTopBar: View {
     @ObservedObject var vm: QuizViewModel
-    let dismiss: DismissAction
+    let onDismiss: () -> Void
+    @State private var showSFXTooltip = false
     var body: some View {
         HStack {
-            Button { dismiss() } label: {
+            Button {
+                AudioManager.shared.stopAll()
+                vm.playingChoiceId = nil
+                onDismiss()
+            } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 14)).foregroundColor(.secondary)
                     .padding(8).background(Color(.systemFill)).clipShape(Circle())
@@ -306,6 +723,16 @@ struct QuizTopBar: View {
                     Image(systemName: vm.sfxEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
                         .font(.system(size: 13))
                         .foregroundColor(vm.sfxEnabled ? Color(hex: "#534AB7") : .secondary)
+                }
+                .help("Sound effects — the correct/wrong/combo chimes, muted separately from the quiz audio itself")
+                .accessibilityLabel(vm.sfxEnabled ? "Sound effects on" : "Sound effects off")
+                .onLongPressGesture(minimumDuration: 0.4) { showSFXTooltip = true }
+                .popover(isPresented: $showSFXTooltip) {
+                    Text("Toggles the short chime/buzz/combo sound effects — this doesn't affect the quiz clip audio itself.")
+                        .font(.system(size: 13))
+                        .padding()
+                        .frame(maxWidth: 240)
+                        .presentationCompactAdaptation(.popover)
                 }
                 Text("\(vm.score) pts")
                     .font(.system(size: 13, weight: .medium))
@@ -365,9 +792,21 @@ struct QuizProgressBar: View {
 // MARK: - Multiple Choice
 struct MCQuestionView: View {
     @ObservedObject var vm: QuizViewModel
-    @State private var isPlaying = false
-    @State private var playCount = 0
+    @ObservedObject private var audio = AudioManager.shared
+    @State private var hasPlayedOnce = false
     let letters = ["A","B","C","D","E","F"]
+
+    /// Whether AudioManager's current playback state actually belongs to this clip (it's a
+    /// shared singleton, so this guards against stale state left over from a previous clip).
+    private var isCurrentClip: Bool { audio.currentFileID == vm.currentClip.fileName }
+    private var isPlaying: Bool     { isCurrentClip && audio.isPlaying }
+    /// True once this clip has played all the way through — at that point there's nothing
+    /// left to resume, so the button locks rather than allowing a restart from the beginning.
+    private var hasFinished: Bool   { isCurrentClip && audio.didFinishPlaying }
+
+    /// Locked once answered, or once the clip has played to completion — pausing and
+    /// resuming mid-playback stays available the whole time in between.
+    var playDisabled: Bool { vm.answered || hasFinished }
 
     func optState(_ i: Int) -> OptionState {
         guard vm.answered else { return vm.selectedOption == i ? .selected : .normal }
@@ -387,18 +826,22 @@ struct MCQuestionView: View {
                     Spacer()
                     DifficultyBadge(difficulty: vm.currentClip.difficulty)
                 }
-                Text(vm.currentClip.name)
-                    .font(.system(size: 14, weight: .medium)).multilineTextAlignment(.center)
+                if vm.isBonusQuestion {
+                    BonusQuestionBadge(points: vm.currentQuestionPoints)
+                }
                 WaveformView(isPlaying: isPlaying)
                 HStack(spacing: 14) {
                     Button {
-                        isPlaying.toggle()
                         if isPlaying {
-                            playCount += 1
-                            AudioManager.shared.play(fileName: vm.currentClip.fileName)
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { isPlaying = false }
-                        } else {
-                            AudioManager.shared.stopAll()
+                            audio.pause()
+                            vm.pauseTimer()
+                        } else if hasPlayedOnce && isCurrentClip {
+                            audio.resume()
+                            vm.resumeTimer()
+                        } else if !hasPlayedOnce {
+                            hasPlayedOnce = true
+                            vm.startTimerIfNeeded()
+                            audio.play(fileName: vm.currentClip.fileName)
                         }
                     } label: {
                         ZStack {
@@ -406,9 +849,11 @@ struct MCQuestionView: View {
                             Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                                 .font(.system(size: 20)).foregroundColor(.white)
                         }
+                        .opacity(playDisabled ? 0.5 : 1.0)
                     }
+                    .disabled(playDisabled)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(isPlaying ? "Playing…" : playCount == 0 ? "Tap to listen" : "Replay (\(playCount)x)")
+                        Text(isPlaying ? "Playing…" : hasFinished ? "Played" : hasPlayedOnce ? "Paused" : "Tap to listen")
                             .font(.system(size: 13)).foregroundColor(.secondary)
                         if let combo = vm.comboMessage {
                             Text(combo).font(.system(size: 12, weight: .medium))
@@ -424,9 +869,12 @@ struct MCQuestionView: View {
             if let q = vm.currentClip.multipleChoiceQuestion {
                 Text(q.text).font(.system(size: 15, weight: .medium))
                     .frame(maxWidth: .infinity, alignment: .leading)
-                ForEach(Array(q.options.enumerated()), id: \.offset) { i, opt in
-                    OptionBtn(letter: letters[i], text: opt, state: optState(i),
-                              disabled: vm.answered) { vm.selectOption(i) }
+                HintRow(vm: vm)
+                ForEach(Array(vm.optionOrder.enumerated()), id: \.offset) { position, i in
+                    if i != vm.eliminatedOptionIndex {
+                        OptionBtn(letter: letters[position], text: q.options[i], state: optState(i),
+                                  disabled: vm.answered) { vm.selectOption(i) }
+                    }
                 }
             }
         }
@@ -436,6 +884,8 @@ struct MCQuestionView: View {
 // MARK: - Audio Lineup
 struct LineupQuestionView: View {
     @ObservedObject var vm: QuizViewModel
+    @ObservedObject private var audio = AudioManager.shared
+    static let choiceLabels = ["Clip A", "Clip B", "Clip C", "Clip D"]
 
     func choiceState(_ i: Int, _ choice: AudioChoice) -> OptionState {
         guard vm.answered else { return vm.selectedOption == i ? .selected : .normal }
@@ -444,27 +894,38 @@ struct LineupQuestionView: View {
         return .normal
     }
 
+    private func isCurrent(_ choice: AudioChoice) -> Bool { vm.playingChoiceId == choice.id }
+    private func isPlaying(_ choice: AudioChoice) -> Bool { isCurrent(choice) && audio.isPlaying }
+
     var body: some View {
         VStack(spacing: 14) {
+            if vm.isBonusQuestion {
+                BonusQuestionBadge(points: vm.currentQuestionPoints)
+            }
             if !vm.showLineup {
                 MysteryCardView(vm: vm)
             } else if let lu = vm.currentClip.audioLineupQuestion {
                 HStack {
                     DifficultyBadge(difficulty: vm.currentClip.difficulty)
                     Spacer()
-                    Text("\(vm.currentClip.points) pts").font(.system(size: 12)).foregroundColor(.secondary)
+                    Text("\(vm.currentQuestionPoints) pts").font(.system(size: 12)).foregroundColor(.secondary)
                 }
                 Text(lu.promptText).font(.system(size: 15, weight: .medium))
                     .frame(maxWidth: .infinity, alignment: .leading)
-                ForEach(Array(lu.choices.enumerated()), id: \.offset) { i, choice in
-                    AudioChoiceBtn(
-                        choice: choice, index: i,
-                        isPlaying: vm.playingChoiceId == choice.id,
-                        state: choiceState(i, choice),
-                        disabled: vm.answered,
-                        onPlay: { vm.toggleChoice(choice) },
-                        onSelect: { vm.selectedOption = i }
-                    )
+                HintRow(vm: vm)
+                ForEach(Array(vm.choiceOrder.enumerated()), id: \.offset) { position, i in
+                    let choice = lu.choices[i]
+                    if choice.id != vm.eliminatedChoiceId {
+                        AudioChoiceBtn(
+                            choice: choice, displayLabel: Self.choiceLabels[position],
+                            displayDescription: "Candidate \(position + 1)",
+                            isPlaying: isPlaying(choice),
+                            state: choiceState(i, choice),
+                            disabled: vm.answered,
+                            onPlay: { vm.toggleChoice(choice) },
+                            onSelect: { vm.selectedOption = i }
+                        )
+                    }
                 }
             }
         }
@@ -511,8 +972,8 @@ struct MysteryCardView: View {
                 Text("Now compare it against the clips below")
                     .font(.system(size: 13)).foregroundColor(.secondary).multilineTextAlignment(.center)
                 Button {
+                    AudioManager.shared.stopAll()
                     withAnimation { vm.showLineup = true }
-                    vm.startTimer()
                 } label: {
                     Text("Show the lineup →")
                         .font(.system(size: 15, weight: .medium)).foregroundColor(Color(hex: "#534AB7"))
@@ -539,6 +1000,7 @@ struct OptionBtn: View {
                 }
                 Text(text).font(.system(size: 14)).foregroundColor(state.text)
                     .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer()
             }
             .padding(13).background(state.bg).cornerRadius(12)
@@ -552,8 +1014,16 @@ struct OptionBtn: View {
 
 // MARK: - Audio Choice Button
 struct AudioChoiceBtn: View {
-    let choice: AudioChoice; let index: Int
-    let isPlaying: Bool; let state: OptionState; let disabled: Bool
+    let choice: AudioChoice
+    /// Positional label/description ("Clip A" / "Candidate 1", etc.) — derived from on-screen
+    /// position rather than the choice's stored values, since choices render in a shuffled
+    /// order each time; these are purely visual identifiers, not tied to any real data.
+    let displayLabel: String
+    let displayDescription: String
+    let isPlaying: Bool; let state: OptionState
+    /// Gates both picking this choice as the answer and playing it — choices can be freely
+    /// replayed/switched between at any time until the question's answered.
+    let disabled: Bool
     let onPlay: () -> Void; let onSelect: () -> Void
     var body: some View {
         Button(action: onSelect) {
@@ -566,10 +1036,13 @@ struct AudioChoiceBtn: View {
                             Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                                 .font(.system(size: 13)).foregroundColor(.white)
                         }
+                        .opacity(disabled ? 0.5 : 1.0)
                     }.disabled(disabled)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(choice.label).font(.system(size: 13, weight: .medium)).foregroundColor(state.text)
-                        Text(choice.description).font(.system(size: 12)).foregroundColor(.secondary)
+                        Text(displayLabel).font(.system(size: 13, weight: .medium)).foregroundColor(state.text)
+                        Text(displayDescription).font(.system(size: 12)).foregroundColor(.secondary)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
                     ZStack {
@@ -596,7 +1069,13 @@ struct QuizActionBar: View {
     }
     var feedbackText: String {
         if vm.isCorrect {
-            return "Correct!" + (vm.streak >= 2 ? " — \(vm.streak)x combo! 🔥" : "")
+            var text = "Correct!"
+            if vm.isBonusQuestion {
+                let earned = Int(Double(vm.currentQuestionPoints) * vm.bonusMultiplier)
+                text = "⭐ Bonus! +\(earned) pts"
+            }
+            if vm.streak >= 2 { text += " — \(vm.streak)x combo! 🔥" }
+            return text
         }
         switch vm.currentClip.questionType {
         case .multipleChoice:
@@ -631,7 +1110,7 @@ struct QuizActionBar: View {
                         .cornerRadius(12).disabled(!canSubmit)
                         .animation(.easeInOut(duration: 0.2), value: canSubmit)
                 } else {
-                    Button(vm.currentIndex + 1 >= vm.totalClips ? "See my MusicIQ →" : "Next →") {
+                    Button(vm.currentIndex + 1 >= vm.totalClips ? "Finish round →" : "Next →") {
                         withAnimation { vm.advance() }
                     }
                     .font(.system(size: 15, weight: .medium)).foregroundColor(.white)
@@ -665,7 +1144,7 @@ struct WaveformView: View {
                 }
             }
         }
-        .onChange(of: isPlaying) { _, newValue in
+        .onChange(of: isPlaying) { newValue in
             if newValue {
                 withAnimation(.linear(duration: 0.6).repeatForever(autoreverses: false)) {
                     phase += .pi * 2
@@ -675,23 +1154,55 @@ struct WaveformView: View {
     }
 }
 
+// MARK: - Hint Row
+struct HintRow: View {
+    @ObservedObject var vm: QuizViewModel
+
+    var body: some View {
+        if let hint = vm.currentClip.hint, !hint.isEmpty {
+            if vm.hintUsed {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "lightbulb.fill")
+                        .font(.system(size: 11)).foregroundColor(Color(hex: "#EF9F27"))
+                    Text(hint).font(.system(size: 12)).foregroundColor(.secondary)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(hex: "#FAEEDA"))
+                .cornerRadius(10)
+            } else {
+                Button { vm.useHint() } label: {
+                    Label("Use a hint", systemImage: "lightbulb")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Color(hex: "#EF9F27"))
+                }
+                .disabled(!vm.hintAvailable)
+            }
+        }
+    }
+}
+
+// MARK: - Bonus Question Badge
+struct BonusQuestionBadge: View {
+    let points: Int
+    var body: some View {
+        Label("Bonus Question — \(points) pts!", systemImage: "star.fill")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(Color(hex: "#854F0B"))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background(Color(hex: "#FAEEDA"))
+            .cornerRadius(10)
+    }
+}
+
 // MARK: - Difficulty Badge
 struct DifficultyBadge: View {
     let difficulty: Difficulty
-    var color: Color {
-        switch difficulty {
-        case .easy:   return Color(hex: "#1D9E75")
-        case .medium: return Color(hex: "#BA7517")
-        case .hard:   return Color(hex: "#993C1D")
-        }
-    }
-    var bg: Color {
-        switch difficulty {
-        case .easy:   return Color(hex: "#E1F5EE")
-        case .medium: return Color(hex: "#FAEEDA")
-        case .hard:   return Color(hex: "#FAECE7")
-        }
-    }
+    var color: Color { Color(hex: difficulty.accentHex) }
+    var bg: Color    { Color(hex: difficulty.bgHex) }
     var body: some View {
         HStack(spacing: 4) {
             ForEach(0..<3) { i in
@@ -706,5 +1217,5 @@ struct DifficultyBadge: View {
 }
 
 #Preview {
-    QuizView(quizSet: QuizSet.sampleSets[0]) { _, _ in }
+    QuizView(quizSet: QuizSet.sampleSets[0]) { _, _, _, _ in }
 }

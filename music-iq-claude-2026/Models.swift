@@ -61,6 +61,20 @@ enum Difficulty: Int, Codable, CaseIterable {
         case .hard:   return "Hard"
         }
     }
+    var accentHex: String {
+        switch self {
+        case .easy:   return "#1D9E75"
+        case .medium: return "#BA7517"
+        case .hard:   return "#993C1D"
+        }
+    }
+    var bgHex: String {
+        switch self {
+        case .easy:   return "#E1F5EE"
+        case .medium: return "#FAEEDA"
+        case .hard:   return "#FAECE7"
+        }
+    }
     var timerSeconds: Int {
         switch self {
         case .easy:   return 30
@@ -73,6 +87,15 @@ enum Difficulty: Int, Codable, CaseIterable {
         case .easy:   return 1.0
         case .medium: return 1.5
         case .hard:   return 2.0
+        }
+    }
+    /// The payout for a round's single random "bonus question" (see `QuizSet.bonusClipID`),
+    /// scaled by difficulty like everything else.
+    var bonusQuestionPoints: Int {
+        switch self {
+        case .easy:   return 1000
+        case .medium: return 1500
+        case .hard:   return 2000
         }
     }
 }
@@ -101,15 +124,17 @@ struct AudioChoice: Identifiable, Codable {
     let label: String
     let description: String
     let fileName: String
+    let trackLengthSeconds: Int
     let isCorrect: Bool
 
     init(id: UUID = UUID(), label: String, description: String,
-         fileName: String, isCorrect: Bool) {
-        self.id          = id
-        self.label       = label
-        self.description = description
-        self.fileName    = fileName
-        self.isCorrect   = isCorrect
+         fileName: String, trackLengthSeconds: Int = 0, isCorrect: Bool) {
+        self.id                 = id
+        self.label              = label
+        self.description        = description
+        self.fileName           = fileName
+        self.trackLengthSeconds = trackLengthSeconds
+        self.isCorrect          = isCorrect
     }
 }
 
@@ -132,7 +157,7 @@ struct AudioLineupQuestion: Identifiable, Codable {
 }
 
 // MARK: - Clip
-struct Clip: Identifiable, Codable {
+struct Clip: Identifiable, Codable, Hashable {
     let id: UUID
     let name: String
     let fileName: String
@@ -142,6 +167,37 @@ struct Clip: Identifiable, Codable {
     let difficulty: Difficulty
     let multipleChoiceQuestion: MultipleChoiceQuestion?
     let audioLineupQuestion: AudioLineupQuestion?
+
+    /// The clip's real playback duration, when known from imported source content (0 if unset).
+    let trackLengthSeconds: Int
+    /// An optional hint about the clip/question, when supplied by imported source content.
+    let hint: String?
+    /// The originating record's ID in the source content system, for traceability (nil if not imported).
+    let sourceID: String?
+    /// The point value assigned to this question by the source content system (nil if not imported;
+    /// does not currently affect `points` — see `Clip.points`, which is still driven by `basePoints`).
+    let sourceScore: Int?
+
+    /// Extra buffer added on top of the raw audition time for Audio Lineup questions, to leave
+    /// room for switching between choices and deciding rather than just listening once through.
+    static let lineupTimerBufferSeconds = 15
+
+    /// The countdown duration for this question. For multiple choice this is the clip's own
+    /// real length; for Audio Lineup, `trackLengthSeconds` is only the mystery clip's length
+    /// (irrelevant once it's done playing) — what matters during the answer phase is having
+    /// enough time to audition the candidates, so this sums each choice's own length instead
+    /// (plus a fixed buffer). Falls back to the difficulty's default when no real length is
+    /// known (e.g. hand-written sample data with no imported track length).
+    var timerSeconds: Int {
+        switch questionType {
+        case .multipleChoice:
+            return trackLengthSeconds > 0 ? trackLengthSeconds : difficulty.timerSeconds
+        case .audioLineup:
+            let total = audioLineupQuestion?.choices.reduce(0) { $0 + $1.trackLengthSeconds } ?? 0
+            let base  = total > 0 ? total : difficulty.timerSeconds
+            return base + Self.lineupTimerBufferSeconds
+        }
+    }
 
     var points: Int {
         let base: Int
@@ -155,6 +211,8 @@ struct Clip: Identifiable, Codable {
     init(id: UUID = UUID(), name: String, fileName: String,
          category: ClipCategory, setName: String,
          difficulty: Difficulty = .easy,
+         trackLengthSeconds: Int = 0, hint: String? = nil,
+         sourceID: String? = nil, sourceScore: Int? = nil,
          question: MultipleChoiceQuestion) {
         self.id                     = id
         self.name                   = name
@@ -165,11 +223,17 @@ struct Clip: Identifiable, Codable {
         self.difficulty             = difficulty
         self.multipleChoiceQuestion = question
         self.audioLineupQuestion    = nil
+        self.trackLengthSeconds     = trackLengthSeconds
+        self.hint                   = hint
+        self.sourceID               = sourceID
+        self.sourceScore            = sourceScore
     }
 
     init(id: UUID = UUID(), name: String, fileName: String,
          category: ClipCategory, setName: String,
          difficulty: Difficulty = .easy,
+         trackLengthSeconds: Int = 0, hint: String? = nil,
+         sourceID: String? = nil, sourceScore: Int? = nil,
          lineupQuestion: AudioLineupQuestion) {
         self.id                     = id
         self.name                   = name
@@ -180,7 +244,16 @@ struct Clip: Identifiable, Codable {
         self.difficulty             = difficulty
         self.multipleChoiceQuestion = nil
         self.audioLineupQuestion    = lineupQuestion
+        self.trackLengthSeconds     = trackLengthSeconds
+        self.hint                   = hint
+        self.sourceID               = sourceID
+        self.sourceScore            = sourceScore
     }
+
+    // Identity-based rather than synthesized — the nested question types don't need to carry
+    // Hashable conformance just so a Clip can be used as a SwiftUI navigation item.
+    static func == (lhs: Clip, rhs: Clip) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
 // MARK: - Quiz Set
@@ -189,63 +262,76 @@ struct QuizSet: Identifiable {
     let name: String
     let category: ClipCategory
     let clips: [Clip]
+    /// The one clip in this set (if any) that pays out `Difficulty.bonusQuestionPoints` instead
+    /// of its normal point value — used for a round's single random "bonus question."
+    let bonusClipID: UUID?
 
     var maxPoints: Int        { clips.reduce(0) { $0 + $1.points } }
     var hasLineupRounds: Bool { clips.contains { $0.questionType == .audioLineup } }
 
-    init(id: UUID = UUID(), name: String, category: ClipCategory, clips: [Clip]) {
-        self.id       = id
-        self.name     = name
-        self.category = category
-        self.clips    = clips
+    init(id: UUID = UUID(), name: String, category: ClipCategory, clips: [Clip], bonusClipID: UUID? = nil) {
+        self.id          = id
+        self.name        = name
+        self.category    = category
+        self.clips       = clips
+        self.bonusClipID = bonusClipID
     }
 }
 
 // MARK: - Game Result
-struct GameResult {
+struct GameResult: Codable {
     let category: ClipCategory
+    let difficulty: Difficulty
     let correct: Bool
     let speedScore: Double
     let pointsEarned: Int
 }
 
 // MARK: - Musical IQ Score
+/// Scored by `Difficulty` rather than `ClipCategory` — the debug content pool tags nearly
+/// everything `.other`, so a category breakdown wouldn't be meaningful today; difficulty tier
+/// is the axis that actually varies across real content.
 struct MusicalIQScore {
     let overallIQ: Int
-    let categoryScores: [ClipCategory: Int]
+    let difficultyScores: [Difficulty: Int]
     let tierLabel: String
     let tierDescription: String
-    let strongestCategory: ClipCategory?
-    let weakestCategory: ClipCategory?
+    let strongestDifficulty: Difficulty?
+    let weakestDifficulty: Difficulty?
+    let questionsAnswered: Int
 
-    static func calculate(results: [GameResult]) -> MusicalIQScore {
-        let categories = Array(Set(results.map { $0.category }))
-        var catScores: [ClipCategory: Int] = [:]
+    /// Nil (rather than a misleadingly confident default score) when there's nothing to score yet.
+    static func calculate(results: [GameResult]) -> MusicalIQScore? {
+        guard !results.isEmpty else { return nil }
 
-        for category in categories {
-            let catResults  = results.filter { $0.category == category }
-            guard !catResults.isEmpty else { continue }
-            let accuracy    = Double(catResults.filter { $0.correct }.count) / Double(catResults.count)
-            let avgSpeed    = catResults.map { $0.speedScore }.reduce(0, +) / Double(catResults.count)
-            let streakBonus = min(Double(catResults.filter { $0.correct }.count) * 0.05, 0.15)
-            catScores[category] = Int((accuracy * 0.60 + avgSpeed * 0.25 + streakBonus) * 100)
+        let difficulties = Array(Set(results.map { $0.difficulty }))
+        var diffScores: [Difficulty: Int] = [:]
+
+        for difficulty in difficulties {
+            let diffResults = results.filter { $0.difficulty == difficulty }
+            guard !diffResults.isEmpty else { continue }
+            let accuracy    = Double(diffResults.filter { $0.correct }.count) / Double(diffResults.count)
+            let avgSpeed    = diffResults.map { $0.speedScore }.reduce(0, +) / Double(diffResults.count)
+            let streakBonus = min(Double(diffResults.filter { $0.correct }.count) * 0.05, 0.15)
+            diffScores[difficulty] = Int((accuracy * 0.60 + avgSpeed * 0.25 + streakBonus) * 100)
         }
 
-        let avg = catScores.isEmpty ? 50.0 :
-            Double(catScores.values.reduce(0, +)) / Double(catScores.count)
+        let avg = diffScores.isEmpty ? 50.0 :
+            Double(diffScores.values.reduce(0, +)) / Double(diffScores.count)
         let iq  = min(160, max(80, Int(80 + (avg / 100.0) * 80)))
 
-        let strongest = catScores.max(by: { $0.value < $1.value })?.key
-        let weakest   = catScores.min(by: { $0.value < $1.value })?.key
+        let strongest = diffScores.max(by: { $0.value < $1.value })?.key
+        let weakest   = diffScores.min(by: { $0.value < $1.value })?.key
         let (label, desc) = tierInfo(for: iq)
 
         return MusicalIQScore(
             overallIQ: iq,
-            categoryScores: catScores,
+            difficultyScores: diffScores,
             tierLabel: label,
             tierDescription: desc,
-            strongestCategory: strongest,
-            weakestCategory: weakest
+            strongestDifficulty: strongest,
+            weakestDifficulty: weakest,
+            questionsAnswered: results.count
         )
     }
 
